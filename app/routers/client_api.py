@@ -79,6 +79,9 @@ ALLOWED_RULE_EVENTS = {
     "AddPaymentInfo",
     "Purchase",
     "Lead",
+    "Contact",
+    "CompleteRegistration",
+    "Subscribe",
     "Search",
     "Refund",
 }
