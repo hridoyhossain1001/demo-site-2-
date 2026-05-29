@@ -240,6 +240,27 @@ function buykorigw_ajax_track_event() {
         buykorigw_normalize_content_identifiers( $custom_data, $content_format );
     }
 
+    // Sanitize: remove invalid content_ids (e.g. currency codes like "BDT", "USD")
+    if ( ! empty( $custom_data['content_ids'] ) && is_array( $custom_data['content_ids'] ) ) {
+        $custom_data['content_ids'] = array_values( array_filter( $custom_data['content_ids'], function ( $id ) {
+            $id = trim( (string) $id );
+            return $id !== '' && ! preg_match( '/^[A-Z]{3}$/i', $id );
+        } ) );
+        if ( empty( $custom_data['content_ids'] ) ) {
+            unset( $custom_data['content_ids'] );
+        }
+    }
+    if ( ! empty( $custom_data['contents'] ) && is_array( $custom_data['contents'] ) ) {
+        $custom_data['contents'] = array_values( array_filter( $custom_data['contents'], function ( $item ) {
+            $id = $item['content_id'] ?? ( $item['id'] ?? '' );
+            $id = trim( (string) $id );
+            return $id !== '' && ! preg_match( '/^[A-Z]{3}$/i', $id );
+        } ) );
+        if ( empty( $custom_data['contents'] ) ) {
+            unset( $custom_data['contents'] );
+        }
+    }
+
     // Build user_data with PII hashing
     $user_data = array(
         'client_ip_address' => buykorigw_get_real_ip(),
