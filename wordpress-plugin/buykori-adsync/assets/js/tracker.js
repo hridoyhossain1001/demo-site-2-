@@ -495,6 +495,14 @@
         return match ? decodeURIComponent(match[2]) : '';
     }
 
+    function isValidContentId(id) {
+        var s = String(id || '').trim();
+        if (!s) return false;
+        // 3-letter ISO currency codes (BDT, USD, EUR…) কে reject করো
+        if (/^[A-Z]{3}$/i.test(s)) return false;
+        return true;
+    }
+
     function normalizeEventData(data) {
         var out = {};
         Object.keys(data || {}).forEach(function(key) {
@@ -506,13 +514,15 @@
         if (out.content_ids) {
             out.content_ids = (Array.isArray(out.content_ids) ? out.content_ids : [out.content_ids])
                 .map(function(id) { return String(id || '').trim(); })
-                .filter(Boolean);
+                .filter(isValidContentId); // currency string যেন না ঢোকে
             if (!out.content_ids.length) delete out.content_ids;
         }
 
         if (out.contents && Array.isArray(out.contents)) {
             out.contents = out.contents.filter(function(item) {
-                return item && (item.content_id || item.id);
+                if (!item) return false;
+                var id = item.content_id || item.id;
+                return id && isValidContentId(id);
             });
             if (!out.contents.length) delete out.contents;
         }
@@ -817,8 +827,8 @@
         if (typeof jQuery !== 'undefined') {
             jQuery(document.body).on('added_to_cart', function(e, fragments, hash, $btn) {
                 addToCartFiredViaAjax = true;
-                var pid = $btn ? $btn.attr('data-product_id') : '';
-                var pname = $btn ? $btn.attr('data-product_name') : '';
+                var pid = ($btn ? $btn.attr('data-product_id') : '') || '';
+                var pname = ($btn ? $btn.attr('data-product_name') : '') || '';
                 var pprice = $btn ? parseFloat($btn.attr('data-product_price') || 0) : 0;
 
                 var variationInfo = getSelectedVariationInfo();
@@ -834,14 +844,32 @@
                     attributes = variationInfo.attributes;
                 } else if (pid) {
                     if (cfg.product && String(cfg.product.id) === String(pid)) {
-                        pname = cfg.product.name;
+                        pname = pname || cfg.product.name;
                         if (cfg.content_id_format === 'sku' && cfg.product.sku) {
                             pid = cfg.product.sku;
                         }
-                        pprice = cfg.product.price;
+                        pprice = pprice || cfg.product.price;
                     } else if (cfg.content_id_format === 'sku' && $btn && $btn.attr('data-product_sku')) {
                         pid = $btn.attr('data-product_sku');
                     }
+                } else {
+                    // pid ফাঁকা হলে cfg.product থেকে নাও (shop/archive page-এ $btn.data-product_id miss করতে পারে)
+                    if (cfg.product && cfg.product.id) {
+                        pid = (cfg.content_id_format === 'sku' && cfg.product.sku) ? cfg.product.sku : String(cfg.product.id);
+                        pname = pname || cfg.product.name;
+                        pprice = pprice || cfg.product.price;
+                    } else if ($btn) {
+                        // DOM থেকে শেষ চেষ্টা
+                        var closestProduct = $btn.closest('[data-product_id], [data-product-id]');
+                        if (closestProduct && closestProduct.length) {
+                            pid = closestProduct.attr('data-product_id') || closestProduct.attr('data-product-id') || '';
+                        }
+                    }
+                }
+
+                // validate: pid যেন currency/text না হয় — numeric বা sku হতে হবে
+                if (!pid || /^[a-z]{3}$/i.test(String(pid).trim())) {
+                    return; // BDT/USD এর মতো 3-letter currency code reject করো
                 }
 
                 var item = {
@@ -857,11 +885,11 @@
                     item.attributes = attributes;
                 }
 
-                if (!eventOnce('AddToCart:' + String(pid || 'unknown') + ':' + currentPathKey(), 2)) return;
+                if (!eventOnce('AddToCart:' + String(pid) + ':' + currentPathKey(), 2)) return;
                 clearCheckoutMarkers();
                 sendEvent('AddToCart', {
-                    content_ids: pid ? [String(pid)] : [],
-                    contents: pid ? [item] : [],
+                    content_ids: [String(pid)],
+                    contents: [item],
                     content_name: pname || (cfg.product ? cfg.product.name : ''),
                     content_type: 'product',
                     value: pprice,
