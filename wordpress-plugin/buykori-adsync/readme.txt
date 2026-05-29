@@ -4,7 +4,7 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.5
+Stable tag: 1.2.6
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -43,6 +43,9 @@ Buykori AdSync প্লাগইন আপনার WooCommerce স্টোর
 ক্যাশ-অন-ডেলিভারি (COD) অর্ডারের ক্ষেত্রে Purchase ইভেন্ট তখনই Facebook-এ পাঠানো হয় যখন আপনি অর্ডারটি "Completed" করেন। এতে ফেক অর্ডারের ডাটা Facebook-এ যায় না।
 
 == Changelog ==
+
+= 1.2.6 =
+* Added deferred Purchase tracking on WooCommerce checkout completion hooks so COD orders enter Order Verification even when the thank-you page is skipped by CartFlows, blocks, or redirects
 
 = 1.2.5 =
 * Preserved deduplication keys on secondary TikTok delivery logs so the client portal no longer shows fallback did_* keys

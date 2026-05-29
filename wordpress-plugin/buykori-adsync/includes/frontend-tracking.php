@@ -368,6 +368,28 @@ function buykorigw_ajax_rate_limited() {
 
 // ─── WooCommerce: Purchase Event on Thank You Page (Server-Side) ───────────────
 add_action( 'woocommerce_thankyou', 'buykorigw_track_purchase', 10, 1 );
+add_action( 'woocommerce_checkout_order_processed', 'buykorigw_track_deferred_purchase_after_checkout', 30, 1 );
+add_action( 'woocommerce_store_api_checkout_order_processed', 'buykorigw_track_deferred_purchase_after_store_api_checkout', 30, 1 );
+
+function buykorigw_track_deferred_purchase_after_checkout( $order_id ) {
+    $settings = buykorigw_get_settings();
+
+    if ( empty( $settings['deferred_purchase'] ) ) {
+        return;
+    }
+
+    buykorigw_track_purchase( $order_id );
+}
+
+function buykorigw_track_deferred_purchase_after_store_api_checkout( $order ) {
+    $settings = buykorigw_get_settings();
+
+    if ( empty( $settings['deferred_purchase'] ) || ! is_object( $order ) || ! method_exists( $order, 'get_id' ) ) {
+        return;
+    }
+
+    buykorigw_track_purchase( $order->get_id() );
+}
 
 function buykorigw_track_purchase( $order_id ) {
     $settings = buykorigw_get_settings();
