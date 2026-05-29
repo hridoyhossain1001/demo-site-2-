@@ -22,6 +22,10 @@ router = APIRouter()
 class CourierSettingsResponse(BaseModel):
     pathao_api_key: Optional[str] = None
     pathao_secret_key: Optional[str] = None
+    pathao_client_id: Optional[str] = None
+    pathao_email: Optional[str] = None
+    pathao_client_secret: Optional[str] = None
+    pathao_password: Optional[str] = None
     pathao_store_id: Optional[str] = None
     steadfast_api_key: Optional[str] = None
     steadfast_secret_key: Optional[str] = None
@@ -31,6 +35,10 @@ class CourierSettingsResponse(BaseModel):
 class CourierSettingsUpdate(BaseModel):
     pathao_api_key: Optional[str] = None
     pathao_secret_key: Optional[str] = None
+    pathao_client_id: Optional[str] = None
+    pathao_email: Optional[str] = None
+    pathao_client_secret: Optional[str] = None
+    pathao_password: Optional[str] = None
     pathao_store_id: Optional[str] = None
     steadfast_api_key: Optional[str] = None
     steadfast_secret_key: Optional[str] = None
@@ -64,10 +72,30 @@ class CourierOrderResponse(BaseModel):
 
 @router.get("/courier/settings", response_model=CourierSettingsResponse)
 async def get_courier_settings(client: Client = Depends(get_current_portal_client)):
+    pathao_client_id = None
+    pathao_email = None
+    if client.pathao_api_key and "|" in client.pathao_api_key:
+        pathao_client_id, pathao_email = client.pathao_api_key.split("|", 1)
+
+    pathao_secret_display = None
+    pathao_client_secret = None
+    pathao_password = None
+    if client.pathao_secret_key:
+        decrypted_pathao_secret = decrypt_token(client.pathao_secret_key)
+        pathao_secret_display = mask_secret(decrypted_pathao_secret)
+        if "|" in decrypted_pathao_secret:
+            raw_client_secret, raw_password = decrypted_pathao_secret.split("|", 1)
+            pathao_client_secret = mask_secret(raw_client_secret)
+            pathao_password = mask_secret(raw_password)
+
     # Decrypt secrets for display or mask them
     return CourierSettingsResponse(
         pathao_api_key=client.pathao_api_key,
-        pathao_secret_key=mask_secret(decrypt_token(client.pathao_secret_key)) if client.pathao_secret_key else None,
+        pathao_secret_key=pathao_secret_display,
+        pathao_client_id=pathao_client_id,
+        pathao_email=pathao_email,
+        pathao_client_secret=pathao_client_secret,
+        pathao_password=pathao_password,
         pathao_store_id=client.pathao_store_id,
         steadfast_api_key=client.steadfast_api_key,
         steadfast_secret_key=mask_secret(decrypt_token(client.steadfast_secret_key)) if client.steadfast_secret_key else None,
@@ -82,7 +110,18 @@ async def update_courier_settings(
     db: AsyncSession = Depends(get_db)
 ):
     # Update fields. If secret key is provided and is not masked, encrypt it.
-    if settings.pathao_api_key is not None:
+    masked_tokens = ("â€¢", "•", "*")
+
+    def looks_masked(value: Optional[str]) -> bool:
+        if not value:
+            return False
+        return any(token in value for token in masked_tokens)
+
+    if settings.pathao_client_id is not None or settings.pathao_email is not None:
+        client_id = (settings.pathao_client_id or "").strip()
+        email = (settings.pathao_email or "").strip()
+        client.pathao_api_key = f"{client_id}|{email}" if client_id or email else None
+    elif settings.pathao_api_key is not None:
         client.pathao_api_key = settings.pathao_api_key.strip() or None
     if settings.pathao_store_id is not None:
         client.pathao_store_id = settings.pathao_store_id.strip() or None
@@ -94,6 +133,21 @@ async def update_courier_settings(
     client.courier_auto_send = settings.courier_auto_send
     
     # Encrypt credentials if they are newly updated and not masked
+    if settings.pathao_client_secret is not None or settings.pathao_password is not None:
+        current_secret = decrypt_token(client.pathao_secret_key) if client.pathao_secret_key else ""
+        current_client_secret = ""
+        current_password = ""
+        if "|" in current_secret:
+            current_client_secret, current_password = current_secret.split("|", 1)
+
+        new_client_secret = (settings.pathao_client_secret or "").strip()
+        new_password = (settings.pathao_password or "").strip()
+        if looks_masked(new_client_secret):
+            new_client_secret = current_client_secret
+        if looks_masked(new_password):
+            new_password = current_password
+
+        client.pathao_secret_key = encrypt_token(f"{new_client_secret}|{new_password}") if new_client_secret or new_password else None
     if settings.pathao_secret_key and not (settings.pathao_secret_key.startswith("•••") or "••••••••••••" in settings.pathao_secret_key):
         client.pathao_secret_key = encrypt_token(settings.pathao_secret_key.strip())
     elif settings.pathao_secret_key == "":
