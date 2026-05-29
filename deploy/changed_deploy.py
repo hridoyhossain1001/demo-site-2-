@@ -7,7 +7,7 @@ Usage:
 Environment:
     DO_SSH_HOST       SSH host, defaults to 159.223.59.78
     DO_SSH_USER       SSH user, defaults to root
-    DO_SSH_PASSWORD   SSH password; required unless key auth is added later
+    DO_SSH_PASSWORD   Optional SSH password; omit to use local SSH key/agent auth
     DO_REMOTE_DIR     Remote project directory, defaults to /var/www/buykori-adsync
 """
 
@@ -122,8 +122,6 @@ def main() -> int:
     host = os.environ.get("DO_SSH_HOST", "159.223.59.78")
     username = os.environ.get("DO_SSH_USER", "root")
     password = os.environ.get("DO_SSH_PASSWORD")
-    if not password:
-        raise RuntimeError("Set DO_SSH_PASSWORD before running deploy/changed_deploy.py")
 
     changes = changed_files(args.base)
     if not changes:
@@ -132,7 +130,14 @@ def main() -> int:
 
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(host, username=username, password=password, timeout=20)
+    ssh.connect(
+        host,
+        username=username,
+        password=password,
+        timeout=20,
+        look_for_keys=True,
+        allow_agent=True,
+    )
     sftp = ssh.open_sftp()
 
     try:

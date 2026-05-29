@@ -181,11 +181,10 @@ bash deploy/deploy.sh
 Local workspace theke fast hotfix deploy korte changed-file helper chalan:
 
 ```powershell
-$env:DO_SSH_PASSWORD="your-droplet-password"
 python deploy\changed_deploy.py --base origin/main
-Remove-Item Env:\DO_SSH_PASSWORD
 ```
 
+If SSH key auth is not configured yet, set `DO_SSH_PASSWORD` for that command only.
 Use `--skip-migrations` or `--skip-restart` only when you are sure that step is not needed.
 
 ---
