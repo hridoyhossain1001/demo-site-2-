@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, Request, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, update, desc, cast, Numeric
+from sqlalchemy import select, func, and_, update, desc, cast, Numeric, String
 
 from app.database import get_db
 from app.models.client import Client
@@ -1083,7 +1083,7 @@ async def get_deferred_purchases(
     confirmed_today = confirmed_today_r.scalar() or 0
 
     sum_and_min_stmt = select(
-        func.sum(cast(PendingEvent.event_data['custom_data']['value'].astext, Numeric)),
+        func.sum(cast(PendingEvent.event_data['custom_data'].op('->>')('value'), Numeric)),
         func.min(PendingEvent.created_at)
     ).where(
         and_(
