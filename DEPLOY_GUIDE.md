@@ -185,6 +185,12 @@ python deploy\changed_deploy.py --base origin/main
 ```
 
 If SSH key auth is not configured yet, set `DO_SSH_PASSWORD` for that command only.
+Preview the planned upload/delete list first:
+
+```powershell
+python deploy\changed_deploy.py --base origin/main --dry-run
+```
+
 Use `--skip-migrations` or `--skip-restart` only when you are sure that step is not needed.
 
 ### Pending deploy hardening

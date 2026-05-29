@@ -3,6 +3,7 @@
 Usage:
     set DO_SSH_PASSWORD=...
     python deploy/changed_deploy.py --base origin/main
+    python deploy/changed_deploy.py --base origin/main --dry-run
 
 Environment:
     DO_SSH_HOST       SSH host, defaults to 159.223.59.78
@@ -113,6 +114,7 @@ def run_remote(ssh: paramiko.SSHClient, command: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", default="HEAD~1", help="Git ref to diff against")
+    parser.add_argument("--dry-run", action="store_true", help="Print planned upload/delete/restart steps without connecting")
     parser.add_argument("--skip-migrations", action="store_true")
     parser.add_argument("--skip-restart", action="store_true")
     args = parser.parse_args()
@@ -126,6 +128,17 @@ def main() -> int:
     changes = changed_files(args.base)
     if not changes:
         print("No deployable tracked file changes found.")
+        return 0
+
+    if args.dry_run:
+        print(f"Dry run against base {args.base}")
+        for status_code, rel_path in changes:
+            action = "delete" if status_code == "D" else "upload"
+            print(f"{action}: {rel_path}")
+        if not args.skip_migrations:
+            print("remote: run alembic upgrade head")
+        if not args.skip_restart:
+            print("remote: restart buykori-web and buykori-worker:*")
         return 0
 
     ssh = paramiko.SSHClient()
