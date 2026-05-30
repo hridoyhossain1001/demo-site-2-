@@ -214,7 +214,23 @@ async def get_profile(
             )
         )
     )
-    events_used = result.scalar() or 0
+    db_events_used = result.scalar() or 0
+
+    # Also check Redis for real-time count (Redis may be ahead of DB sync)
+    redis_events_used = 0
+    try:
+        from app.services.redis_pool import get_redis
+        r = get_redis()
+        if r is not None:
+            rkey = f"usage:{client.id}:{monthly_key}"
+            redis_val = await r.get(rkey)
+            if redis_val is not None:
+                redis_events_used = int(redis_val)
+    except Exception as redis_err:
+        logger.warning(f"[profile] Redis usage read failed: {redis_err}")
+
+    # Use the higher of DB or Redis — whichever is more up-to-date
+    events_used = max(db_events_used, redis_events_used)
     events_quota = client.monthly_limit or 50000
 
     plan_name = "Enterprise Plan"
