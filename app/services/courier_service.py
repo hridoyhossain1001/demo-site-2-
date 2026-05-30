@@ -433,6 +433,7 @@ class CourierService:
         merchant_order_id: str,
         item_quantity: int = 1,
         item_weight: float = 0.5,
+        item_description: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Pathao Courier-এ অর্ডার প্লেস করা।
@@ -455,6 +456,11 @@ class CourierService:
             "Accept": "application/json",
         }
 
+        # Truncate description if too long
+        desc_to_use = item_description or f"Order {merchant_order_id}"
+        if len(desc_to_use) > 300:
+            desc_to_use = desc_to_use[:297] + "..."
+
         payload = {
             "store_id": int(store_id),
             "merchant_order_id": merchant_order_id,
@@ -469,7 +475,7 @@ class CourierService:
             "item_quantity": item_quantity,
             "item_weight": item_weight,
             "amount_to_collect": cod_amount,
-            "item_description": f"Order {merchant_order_id}",
+            "item_description": desc_to_use,
         }
 
         logger.info(
@@ -667,27 +673,38 @@ class CourierService:
             except Exception:
                 data = {}
 
+            # Pathao response field extraction
+            # Pathao sometimes returns: {"error": true, "success": true, "message": "Unauthorized!"}
+            # We must check "error": true as a failure signal too.
             body_code = data.get("code") or data.get("status")
-            body_message = data.get("message") or data.get("error") or ""
+            body_error_flag = data.get("error")  # True = failed, False/None = ok
+            body_message = data.get("message") or ""
+            if not body_message and isinstance(body_error_flag, str):
+                body_message = body_error_flag  # fallback if error is a string message
 
             if response.status_code in (200, 201):
-                # Pathao কখনো HTTP 200 দিয়েও body-তে 4xx code দিতে পারে
+                # Pathao কখনো HTTP 200 দিয়েও body-তে error signal দিতে পারে।
+                # Case 1: body-তে numeric error code (>= 400)
                 try:
                     body_code_int = int(body_code) if body_code is not None else 200
                 except (TypeError, ValueError):
                     body_code_int = 200
 
-                if body_code_int >= 400:
-                    # Pathao-side cancel fail হয়েছে
+                # Case 2: body-তে "error": true (Unauthorized বা অন্য error)
+                pathao_error = body_code_int >= 400 or body_error_flag is True
+
+                if pathao_error:
                     logger.error(
-                        f"Pathao cancel HTTP 200 but body code={body_code_int} "
-                        f"for {consignment_id}: {body_message}"
+                        f"Pathao cancel HTTP 200 but error detected "
+                        f"(code={body_code_int}, error_flag={body_error_flag}) "
+                        f"for consignment {consignment_id}: {body_message}"
                     )
+                    reason = body_message or f"Pathao error (code={body_code_int})"
                     return {
                         "success": True,
                         "local_only": True,
                         "message": (
-                            f"Pathao-তে cancel করা সম্ভব হয়নি: {body_message} "
+                            f"Pathao-তে cancel করা সম্ভব হয়নি: {reason} "
                             "(শুধু এই system-এ cancelled হয়েছে। "
                             "Pathao merchant panel থেকে manually cancel করুন।)"
                         ),
