@@ -35,3 +35,14 @@ Please follow these guidelines automatically whenever making changes to this cod
   - DigitalOcean (for static fallback via `python scratch/deploy_updates.py`)
 * The root repo push (`just-demo-file-`) is **only** for backend files: `app/`, `migrations/`, `scripts/`, `wordpress-plugin/` etc.
 * **Never** auto-push `client-portal/` source to the backup root repo without explicit user instruction.
+
+---
+
+## 5. DigitalOcean Server Credentials
+* **Host:** `159.223.59.78`
+* **User:** `root`
+* **SSH Password:** `1122334455Hk`
+* When running `python scratch/deploy_updates.py`, always set the environment variable first:
+  ```powershell
+  $env:DO_SSH_PASSWORD = "1122334455Hk"; python scratch/deploy_updates.py
+  ```

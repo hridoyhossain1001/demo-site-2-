@@ -629,12 +629,19 @@ class CourierService:
         """
         Pathao-তে Pending/Pickable অর্ডার cancel করা।
         Pathao API: POST /aladdin/api/v1/orders/cancel
-        Body: { "consignment_id": "..." }
+        Body: { "consignment_id": <integer> }
         শুধুমাত্র 'Pending' বা 'Pickup Requested' state-এর order cancel করা যায়।
+
+        গুরুত্বপূর্ণ: Pathao কখনো HTTP 200 দিলেও body-তে error থাকতে পারে।
+        body-র 'code' field চেক করতে হয়।
         """
         token = await cls.get_pathao_token(client_id, client_secret, email, password)
         if not token:
-            return {"success": False, "error": "Failed to authenticate with Pathao API."}
+            return {
+                "success": True,
+                "local_only": True,
+                "message": "Pathao authentication failed. Order marked cancelled locally. Please cancel manually from Pathao merchant panel.",
+            }
 
         url = f"{PATHAO_BASE_URL}/aladdin/api/v1/orders/cancel"
         headers = {
@@ -642,35 +649,85 @@ class CourierService:
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        payload = {"consignment_id": consignment_id}
+        # Pathao-র API consignment_id integer হিসেবে expect করে
+        try:
+            consignment_id_val = int(consignment_id)
+        except (TypeError, ValueError):
+            consignment_id_val = consignment_id
+
+        payload = {"consignment_id": consignment_id_val}
 
         http = await get_http_client()
         try:
             response = await http.post(url, json=payload, headers=headers)
-            if response.status_code in (200, 201):
+
+            # Response body parse করা
+            try:
                 data = response.json()
+            except Exception:
+                data = {}
+
+            body_code = data.get("code") or data.get("status")
+            body_message = data.get("message") or data.get("error") or ""
+
+            if response.status_code in (200, 201):
+                # Pathao কখনো HTTP 200 দিয়েও body-তে 4xx code দিতে পারে
+                try:
+                    body_code_int = int(body_code) if body_code is not None else 200
+                except (TypeError, ValueError):
+                    body_code_int = 200
+
+                if body_code_int >= 400:
+                    # Pathao-side cancel fail হয়েছে
+                    logger.error(
+                        f"Pathao cancel HTTP 200 but body code={body_code_int} "
+                        f"for {consignment_id}: {body_message}"
+                    )
+                    return {
+                        "success": True,
+                        "local_only": True,
+                        "message": (
+                            f"Pathao-তে cancel করা সম্ভব হয়নি: {body_message} "
+                            "(শুধু এই system-এ cancelled হয়েছে। "
+                            "Pathao merchant panel থেকে manually cancel করুন।)"
+                        ),
+                    }
+
                 logger.info(f"Pathao order {consignment_id} cancelled successfully: {data}")
-                return {"success": True, "raw_response": data}
+                return {
+                    "success": True,
+                    "local_only": False,
+                    "message": f"Pathao-তে order সফলভাবে cancel হয়েছে। {body_message}".strip(". ") + ".",
+                    "raw_response": data,
+                }
             else:
                 err_text = response.text
                 logger.error(
                     f"Pathao cancel failed for {consignment_id}: "
                     f"{response.status_code} - {err_text}"
                 )
-                # Pathao error message parse করার চেষ্টা
-                try:
-                    err_data = response.json()
-                    err_msg = (
-                        err_data.get("message")
-                        or err_data.get("error")
-                        or err_text
-                    )
-                except Exception:
-                    err_msg = err_text
-                return {"success": False, "error": err_msg, "status_code": response.status_code}
+                err_msg = body_message or err_text
+                # HTTP error — local_only দিই, DB-তে cancelled করব কিন্তু user-কে জানাব
+                return {
+                    "success": True,
+                    "local_only": True,
+                    "message": (
+                        f"Pathao API error ({response.status_code}): {err_msg}. "
+                        "(শুধু এই system-এ cancelled হয়েছে। "
+                        "Pathao merchant panel থেকে manually cancel করুন।)"
+                    ),
+                }
         except Exception as e:
             logger.error(f"Exception during Pathao cancel for {consignment_id}: {e}")
-            return {"success": False, "error": str(e)}
+            return {
+                "success": True,
+                "local_only": True,
+                "message": (
+                    f"Network error: {e}. "
+                    "(শুধু এই system-এ cancelled হয়েছে। "
+                    "Pathao merchant panel থেকে manually cancel করুন।)"
+                ),
+            }
 
     @classmethod
     async def cancel_steadfast_order(
