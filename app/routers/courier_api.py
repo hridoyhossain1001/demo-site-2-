@@ -29,6 +29,10 @@ class CourierSettingsResponse(BaseModel):
     pathao_store_id: Optional[str] = None
     steadfast_api_key: Optional[str] = None
     steadfast_secret_key: Optional[str] = None
+    redx_access_token: Optional[str] = None
+    redx_pickup_store_id: Optional[str] = None
+    redx_delivery_area_id: Optional[str] = None
+    redx_delivery_area_name: Optional[str] = None
     courier_auto_send: bool
     default_courier: Optional[str] = None
 
@@ -42,6 +46,10 @@ class CourierSettingsUpdate(BaseModel):
     pathao_store_id: Optional[str] = None
     steadfast_api_key: Optional[str] = None
     steadfast_secret_key: Optional[str] = None
+    redx_access_token: Optional[str] = None
+    redx_pickup_store_id: Optional[str] = None
+    redx_delivery_area_id: Optional[str] = None
+    redx_delivery_area_name: Optional[str] = None
     courier_auto_send: bool
     default_courier: Optional[str] = None
 
@@ -55,6 +63,9 @@ class SendToCourierRequest(BaseModel):
     store_id: Optional[int] = None
     item_weight: Optional[float] = 0.5
     item_quantity: Optional[int] = 1
+    delivery_area_id: Optional[int] = None
+    delivery_area_name: Optional[str] = None
+    pickup_store_id: Optional[int] = None
 
 class CourierOrderResponse(BaseModel):
     id: int
@@ -103,6 +114,10 @@ async def get_courier_settings(client: Client = Depends(get_current_portal_clien
         pathao_store_id=client.pathao_store_id,
         steadfast_api_key=client.steadfast_api_key,
         steadfast_secret_key=mask_secret(decrypt_token(client.steadfast_secret_key)) if client.steadfast_secret_key else None,
+        redx_access_token=mask_secret(decrypt_token(client.redx_access_token)) if client.redx_access_token else None,
+        redx_pickup_store_id=client.redx_pickup_store_id,
+        redx_delivery_area_id=client.redx_delivery_area_id,
+        redx_delivery_area_name=client.redx_delivery_area_name,
         courier_auto_send=client.courier_auto_send,
         default_courier=client.default_courier
     )
@@ -133,6 +148,12 @@ async def update_courier_settings(
         client.steadfast_api_key = settings.steadfast_api_key.strip() or None
     if settings.default_courier is not None:
         client.default_courier = settings.default_courier.strip() or None
+    if settings.redx_pickup_store_id is not None:
+        client.redx_pickup_store_id = settings.redx_pickup_store_id.strip() or None
+    if settings.redx_delivery_area_id is not None:
+        client.redx_delivery_area_id = settings.redx_delivery_area_id.strip() or None
+    if settings.redx_delivery_area_name is not None:
+        client.redx_delivery_area_name = settings.redx_delivery_area_name.strip() or None
         
     client.courier_auto_send = settings.courier_auto_send
     
@@ -161,6 +182,10 @@ async def update_courier_settings(
         client.steadfast_secret_key = encrypt_token(settings.steadfast_secret_key.strip())
     elif settings.steadfast_secret_key == "":
         client.steadfast_secret_key = None
+    if settings.redx_access_token and not looks_masked(settings.redx_access_token):
+        client.redx_access_token = encrypt_token(settings.redx_access_token.strip())
+    elif settings.redx_access_token == "":
+        client.redx_access_token = None
         
     db.add(client)
     await db.commit()
@@ -275,6 +300,27 @@ async def send_order_to_courier(
             item_quantity=qty_to_use,
             item_weight=weight_to_use,
             item_description=item_description_to_use
+        )
+
+    elif req.courier_provider == "redx":
+        if not client.redx_access_token:
+            raise HTTPException(status_code=400, detail="RedX access token is not configured.")
+        delivery_area_id = str(req.delivery_area_id or client.redx_delivery_area_id or "").strip()
+        delivery_area_name = str(req.delivery_area_name or client.redx_delivery_area_name or "").strip()
+        pickup_store_id = str(req.pickup_store_id or client.redx_pickup_store_id or "").strip()
+        if not delivery_area_id or not delivery_area_name:
+            raise HTTPException(status_code=400, detail="RedX delivery area ID and name are required.")
+        result = await CourierService.send_to_redx(
+            access_token=decrypt_token(client.redx_access_token),
+            recipient_name=req.recipient_name,
+            recipient_phone=req.recipient_phone,
+            recipient_address=req.recipient_address,
+            cod_amount=req.cod_amount,
+            merchant_order_id=pending_event.order_id,
+            delivery_area_id=delivery_area_id,
+            delivery_area_name=delivery_area_name,
+            pickup_store_id=pickup_store_id or None,
+            item_weight=req.item_weight or 0.5,
         )
         
     else:
@@ -500,6 +546,20 @@ async def cancel_courier_order(
         )
         local_only = cancel_result.get("local_only", True)
 
+    elif courier_order.courier_provider == "redx":
+        if not client.redx_access_token:
+            raise HTTPException(status_code=400, detail="RedX access token is not configured.")
+        tracking_id = courier_order.courier_tracking_id or courier_order.courier_order_id
+        if not tracking_id:
+            raise HTTPException(status_code=400, detail="RedX tracking ID not found for this order.")
+        cancel_result = await CourierService.cancel_redx_order(
+            access_token=decrypt_token(client.redx_access_token),
+            tracking_id=tracking_id,
+        )
+        if not cancel_result.get("success"):
+            raise HTTPException(status_code=400, detail=f"RedX cancel failed: {cancel_result.get('error', 'Unknown error')}")
+        local_only = False
+
     else:
         raise HTTPException(status_code=400, detail="Unsupported courier provider.")
 
@@ -569,3 +629,11 @@ async def get_pathao_stores(
     )
     return stores
 
+
+@router.get("/courier/redx/areas")
+async def get_redx_areas(
+    client: Client = Depends(get_current_portal_client),
+):
+    if not client.redx_access_token:
+        raise HTTPException(status_code=400, detail="RedX access token is not configured. Please set it in Settings.")
+    return await CourierService.get_redx_areas(decrypt_token(client.redx_access_token))

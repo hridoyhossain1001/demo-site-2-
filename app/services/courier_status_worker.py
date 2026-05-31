@@ -49,6 +49,7 @@ async def poll_active_courier_orders() -> None:
                 "pathao_api_key": client.pathao_api_key,
                 "pathao_secret_key": client.pathao_secret_key,
                 "pathao_store_id": client.pathao_store_id,
+                "redx_access_token": client.redx_access_token,
             })
 
     # The db session is now closed. We perform HTTP calls session-free.
@@ -84,6 +85,13 @@ async def poll_active_courier_orders() -> None:
                         )
                     except ValueError:
                         logger.error(f"Pathao credential format incorrect for client {item['client_name']}")
+
+            elif item["courier_provider"] == "redx":
+                if item["redx_access_token"]:
+                    new_status = await CourierService.check_redx_status(
+                        access_token=decrypt_token(item["redx_access_token"]),
+                        tracking_id=item["courier_tracking_id"],
+                    )
 
             if new_status:
                 logger.info(f"Syncing status for order {item['order_id']}: {item['courier_status']} -> {new_status}")

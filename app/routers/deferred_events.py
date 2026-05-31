@@ -296,6 +296,24 @@ async def _auto_book_courier_for_pending(
                 merchant_order_id=pending.order_id,
                 item_description=item_description_to_use
             )
+        elif provider == "redx":
+            if not (
+                client_obj.redx_access_token
+                and client_obj.redx_delivery_area_id
+                and client_obj.redx_delivery_area_name
+            ):
+                return {"mode": "failed", "message": "RedX credentials and default delivery area are missing."}
+            result = await CourierService.send_to_redx(
+                access_token=decrypt_token(client_obj.redx_access_token),
+                recipient_name=str(raw.get("recipient_name") or "").strip(),
+                recipient_phone=str(raw.get("recipient_phone") or "").strip(),
+                recipient_address=str(raw.get("recipient_address") or "").strip(),
+                cod_amount=cod_amount,
+                merchant_order_id=pending.order_id,
+                delivery_area_id=client_obj.redx_delivery_area_id,
+                delivery_area_name=client_obj.redx_delivery_area_name,
+                pickup_store_id=client_obj.redx_pickup_store_id,
+            )
         else:
             return {"mode": "failed", "message": f"Unsupported courier provider: {provider}"}
     except Exception as exc:
@@ -615,6 +633,26 @@ async def bulk_confirm_events(
                 cod_amount=cod_amount,
                 merchant_order_id=oid,
                 item_description=item_description_to_use
+            )
+            tasks_to_run.append((oid, task))
+        elif default_provider == "redx":
+            if not (
+                client_obj.redx_access_token
+                and client_obj.redx_delivery_area_id
+                and client_obj.redx_delivery_area_name
+            ):
+                event_actions[oid] = {"action": "fail", "error": "RedX credentials and default delivery area are missing."}
+                continue
+            task = CourierService.send_to_redx(
+                access_token=decrypt_token(client_obj.redx_access_token),
+                recipient_name=recipient_name,
+                recipient_phone=recipient_phone,
+                recipient_address=recipient_address,
+                cod_amount=cod_amount,
+                merchant_order_id=oid,
+                delivery_area_id=client_obj.redx_delivery_area_id,
+                delivery_area_name=client_obj.redx_delivery_area_name,
+                pickup_store_id=client_obj.redx_pickup_store_id,
             )
             tasks_to_run.append((oid, task))
         else:

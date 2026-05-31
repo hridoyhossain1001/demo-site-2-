@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 PATHAO_BASE_URL = "https://api-hermes.pathao.com"
 STEADFAST_BASE_URL = "https://portal.packzy.com"
+REDX_BASE_URL = "https://openapi.redx.com.bd/v1.0.0-beta"
 
 # ─── Pathao Token Cache ────────────────────────────────────────────────────────
 # Pathao OAuth2 tokens সাধারণত 1 ঘণ্টা valid থাকে। প্রতি request-এ নতুন token
@@ -622,6 +623,118 @@ class CourierService:
             logger.error(f"Failed to check Pathao status: {e}")
             return None
 
+    # --- RedX ---
+
+    @classmethod
+    async def send_to_redx(
+        cls,
+        access_token: str,
+        recipient_name: str,
+        recipient_phone: str,
+        recipient_address: str,
+        cod_amount: float,
+        merchant_order_id: str,
+        delivery_area_id: str,
+        delivery_area_name: str,
+        pickup_store_id: Optional[str] = None,
+        item_weight: float = 0.5,
+        declared_value: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        url = f"{REDX_BASE_URL}/parcel"
+        headers = {
+            "API-ACCESS-TOKEN": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        payload: Dict[str, Any] = {
+            "customer_name": recipient_name,
+            "customer_phone": cls.normalize_bd_phone(recipient_phone),
+            "delivery_area": delivery_area_name,
+            "delivery_area_id": int(delivery_area_id),
+            "customer_address": recipient_address,
+            "merchant_invoice_id": merchant_order_id,
+            "cash_collection_amount": str(cod_amount),
+            "parcel_weight": int(float(item_weight) * 1000),
+            "instruction": f"Order {merchant_order_id}",
+            "value": declared_value if declared_value is not None else cod_amount,
+        }
+        if pickup_store_id:
+            payload["pickup_store_id"] = int(pickup_store_id)
+
+        http = await get_http_client()
+        try:
+            response = await http.post(url, json=payload, headers=headers)
+            if response.status_code in (200, 201):
+                data = response.json()
+                tracking_id = data.get("tracking_id")
+                if tracking_id:
+                    return {
+                        "success": True,
+                        "courier_order_id": str(tracking_id),
+                        "tracking_id": str(tracking_id),
+                        "raw_response": data,
+                    }
+            logger.error(f"RedX parcel creation failed: {response.status_code} - {response.text}")
+            return {"success": False, "error": response.text}
+        except Exception as e:
+            logger.error(f"Exception during RedX parcel creation: {e}")
+            return {"success": False, "error": str(e)}
+
+    @classmethod
+    async def check_redx_status(cls, access_token: str, tracking_id: str) -> Optional[str]:
+        url = f"{REDX_BASE_URL}/parcel/info/{tracking_id}"
+        headers = {"API-ACCESS-TOKEN": f"Bearer {access_token}"}
+        http = await get_http_client()
+        try:
+            response = await http.get(url, headers=headers)
+            if response.status_code == 200:
+                return response.json().get("parcel", {}).get("status")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to check RedX status: {e}")
+            return None
+
+    @classmethod
+    async def get_redx_areas(cls, access_token: str) -> list:
+        url = f"{REDX_BASE_URL}/areas"
+        headers = {"API-ACCESS-TOKEN": f"Bearer {access_token}"}
+        http = await get_http_client()
+        try:
+            response = await http.get(url, headers=headers)
+            if response.status_code == 200:
+                return response.json().get("areas", []) or []
+            logger.error(f"RedX areas request failed: {response.status_code} - {response.text}")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to fetch RedX areas: {e}")
+            return []
+
+    @classmethod
+    async def cancel_redx_order(cls, access_token: str, tracking_id: str) -> Dict[str, Any]:
+        url = f"{REDX_BASE_URL}/parcels"
+        headers = {
+            "API-ACCESS-TOKEN": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "entity_type": "parcel-tracking-id",
+            "entity_id": tracking_id,
+            "update_details": {
+                "property_name": "status",
+                "new_value": "cancelled",
+                "reason": "Cancelled by merchant",
+            },
+        }
+        http = await get_http_client()
+        try:
+            response = await http.patch(url, json=payload, headers=headers)
+            if response.status_code in (200, 201, 202):
+                data = response.json()
+                if data.get("success"):
+                    return {"success": True, "local_only": False, "message": data.get("message", "RedX cancellation accepted.")}
+            return {"success": False, "error": response.text}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # ─── Cancel Order: Pathao ─────────────────────────────────────────────────
 
     @classmethod
@@ -803,6 +916,18 @@ class CourierService:
             elif raw_status == "cancelled":
                 return "cancelled"
             elif raw_status in ("picked", "in_transit", "shipped"):
+                return "in_transit"
+            else:
+                return "pending"
+
+        elif provider == "redx":
+            if raw_status == "delivered":
+                return "delivered"
+            elif raw_status in ("returned", "agent-returning", "partial-return"):
+                return "returned"
+            elif raw_status == "cancelled":
+                return "cancelled"
+            elif raw_status in ("ready-for-delivery", "delivery-in-progress"):
                 return "in_transit"
             else:
                 return "pending"

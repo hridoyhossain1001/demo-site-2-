@@ -40,6 +40,8 @@ def _official_tracking_url(provider: str, tracking_code: str) -> Optional[str]:
         return f"https://portal.packzy.com/tracking/{safe_tracking_code}"
     if provider == "pathao":
         return "https://pathao.com/courier/tracking"
+    if provider == "redx":
+        return f"https://redx.com.bd/track-parcel/?trackingId={safe_tracking_code}"
     return None
 
 
@@ -417,3 +419,29 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     response = JSONResponse(status_code=200, content={"status": "success"})
     response.headers["X-Pathao-Merchant-Webhook-Integration-Secret"] = client_secret
     return response
+
+
+@router.post("/v1/webhook/redx")
+async def redx_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """Receive RedX parcel status callbacks."""
+    _verify_courier_webhook_secret(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.")
+
+    tracking_id = payload.get("tracking_number")
+    status = payload.get("status")
+    if not tracking_id or not status:
+        return {"status": "ignored", "reason": "missing tracking_number or status"}
+
+    result = await db.execute(
+        select(CourierOrder).where(CourierOrder.courier_tracking_id == str(tracking_id))
+    )
+    courier_order = result.scalar_one_or_none()
+    if not courier_order:
+        return {"status": "ignored", "reason": "order not found"}
+
+    await process_courier_status_change(db, courier_order, str(status))
+    await db.commit()
+    return {"status": "success"}

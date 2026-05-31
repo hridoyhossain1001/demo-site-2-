@@ -51,7 +51,11 @@ class Client(Base):
     pathao_store_id = Column(String, nullable=True)                # Pathao Store ID
     steadfast_api_key = Column(String, nullable=True)              # SteadFast API Key
     steadfast_secret_key = Column(String, nullable=True)            # SteadFast Secret (encrypted)
+    redx_access_token = Column(String, nullable=True)              # RedX bearer token (encrypted)
+    redx_pickup_store_id = Column(String, nullable=True)           # RedX default pickup store ID
+    redx_delivery_area_id = Column(String, nullable=True)          # RedX default delivery area ID
+    redx_delivery_area_name = Column(String, nullable=True)        # RedX default delivery area name
     courier_auto_send = Column(Boolean, default=False, nullable=False) # Confirm করলেই অটো Courier-এ পাঠাবে?
-    default_courier = Column(String, nullable=True)                # 'pathao' / 'steadfast'
+    default_courier = Column(String, nullable=True)                # 'pathao' / 'steadfast' / 'redx'
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
