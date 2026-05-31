@@ -326,7 +326,7 @@ async def get_courier_orders(
     offset: int = Query(0, ge=0),
 ):
     result = await db.execute(
-        select(CourierOrder, PendingEvent.raw_order_data)
+        select(CourierOrder, PendingEvent.raw_order_data, PendingEvent.event_data)
         .outerjoin(PendingEvent, CourierOrder.pending_event_id == PendingEvent.id)
         .where(CourierOrder.client_id == client.id)
         .order_by(desc(CourierOrder.created_at))
@@ -336,7 +336,7 @@ async def get_courier_orders(
     rows = result.all()
     
     response = []
-    for order, raw_order_data in rows:
+    for order, raw_order_data, event_data in rows:
         # Extract products from raw_order_data if available
         products_list = []
         if raw_order_data and isinstance(raw_order_data, dict):
@@ -353,22 +353,45 @@ async def get_courier_orders(
                             "quantity": int(item.get("quantity") or 1),
                             "price": float(item.get("subtotal") or item.get("price") or 0),
                         })
-            # 2. If it's a raw event dict, it might have custom_data.contents
+            # 2. raw_order_data might have custom_data.contents (Facebook CAPI format)
             if not products_list:
                 custom_data = raw_order_data.get("custom_data", {}) or {}
                 contents = custom_data.get("contents", []) or []
                 if isinstance(contents, list):
                     for item in contents:
                         if isinstance(item, dict):
-                            raw_name = item.get("title") or item.get("name") or item.get("product_name") or ""
-                            item_id = str(item.get("id") or "")
+                            raw_name = item.get("title") or item.get("name") or item.get("product_name") or item.get("content_name") or ""
+                            item_id = str(item.get("id") or item.get("content_id") or "")
                             display_name = raw_name if raw_name else f"Product #{item_id}" if item_id else "Unknown Product"
                             products_list.append({
                                 "name": display_name,
                                 "quantity": int(item.get("quantity") or item.get("qty") or 1),
                                 "price": float(item.get("item_price") or item.get("price") or 0),
                             })
-        # If products_list is empty, see if custom_data has num_items
+
+        # 3. Fallback: extract from event_data (CAPI payload stored separately)
+        if not products_list and event_data and isinstance(event_data, dict):
+            # event_data structure: { "data": [{ "custom_data": { "contents": [...] } }] }
+            data_list = event_data.get("data") or []
+            if isinstance(data_list, list) and data_list:
+                first_event = data_list[0] if isinstance(data_list[0], dict) else {}
+                cdata = first_event.get("custom_data", {}) or {}
+            else:
+                cdata = event_data.get("custom_data", {}) or {}
+            contents = cdata.get("contents") or []
+            if isinstance(contents, list):
+                for item in contents:
+                    if isinstance(item, dict):
+                        raw_name = item.get("title") or item.get("name") or item.get("product_name") or item.get("content_name") or ""
+                        item_id = str(item.get("id") or item.get("content_id") or "")
+                        display_name = raw_name if raw_name else f"Product #{item_id}" if item_id else "Unknown Product"
+                        products_list.append({
+                            "name": display_name,
+                            "quantity": int(item.get("quantity") or item.get("qty") or 1),
+                            "price": float(item.get("item_price") or item.get("price") or 0),
+                        })
+
+        # 4. Last resort: num_items fallback
         if not products_list and raw_order_data and isinstance(raw_order_data, dict):
             custom_data = raw_order_data.get("custom_data", {}) or {}
             if custom_data.get("num_items"):
