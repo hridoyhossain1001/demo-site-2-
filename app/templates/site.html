@@ -989,9 +989,34 @@
       .bk-management-inner { padding:24px 18px; }
       .bk-ops-preview { padding:14px; }
       .bk-ops-top, .bk-ops-metrics { grid-template-columns:1fr; }
-      .bk-workflow-strip { margin-bottom:24px; }
+      .bk-workflow-strip {
+        width:min(100% - 32px,420px);
+        margin:2px auto 24px;
+        padding:10px;
+        gap:0;
+        border-radius:20px;
+      }
       .bk-workflow-strip i { display:none; }
-      .bk-workflow-strip div { width:100%; }
+      .bk-workflow-strip div {
+        position:relative;
+        width:100%;
+        gap:12px;
+        min-height:48px;
+        padding:7px 10px;
+        border-radius:13px;
+      }
+      .bk-workflow-strip div:not(:last-of-type)::after {
+        content:"";
+        position:absolute;
+        left:22px;
+        top:39px;
+        width:2px;
+        height:18px;
+        border-radius:2px;
+        background:rgba(var(--primary-rgb),0.2);
+      }
+      .bk-workflow-strip strong { width:26px; height:26px; }
+      .bk-workflow-strip span { font-size:12px; line-height:1.35; }
       .bk-audience-grid { grid-template-columns:1fr; }
     }
 
