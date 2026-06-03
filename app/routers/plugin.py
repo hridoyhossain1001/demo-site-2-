@@ -6,22 +6,54 @@ import io
 import os
 import re
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.audit_log import AuditLog
 from app.models.client import Client
+from app.models.plugin_connect_session import PluginConnectSession
+from app.services.plan_service import (
+    cancel_to_free,
+    find_trial_identity_conflict,
+    record_trial_identity,
+    trial_active,
+)
+from app.services.site_binding_service import get_active_site_binding, upsert_active_site_binding
+from app.utils.plugin_package import plugin_protection_enabled, protect_plugin_package_content
+from app.utils.plugin_connect import (
+    gateway_url_from_request,
+    normalize_site_url,
+    pkce_challenge,
+    sha256_hex,
+    validate_token,
+)
 
 router = APIRouter(tags=["Plugin"])
 
+
+class PluginConnectExchangeRequest(BaseModel):
+    code: str
+    codeVerifier: str
+    state: str
+    siteUrl: str
+    installationId: str | None = None
+
+
+class PluginDisconnectRequest(BaseModel):
+    siteUrl: str
+    installationId: str | None = None
+
 # Plugin version এই ফাইলে hardcoded — PLUGIN_VERSION env var দিয়ে override করা যায়।
 # Update করার সময় এখানে version change করুন এবং WP plugin-এও update করুন।
-PLUGIN_VERSION = "1.2.17"
+PLUGIN_VERSION = "1.2.32"
 PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "wordpress-plugin" / "buykori-adsync"
 PLUGIN_ZIP_PATH = Path(
     os.getenv(
@@ -30,6 +62,8 @@ PLUGIN_ZIP_PATH = Path(
     )
 )
 PLUGIN_DOWNLOAD_URL = os.getenv("PLUGIN_DOWNLOAD_URL", "")
+PLUGIN_PROTECTED_PACKAGE = plugin_protection_enabled()
+PLUGIN_PRECONFIGURED_DOWNLOADS = os.getenv("PLUGIN_PRECONFIGURED_DOWNLOADS", "false").lower() in {"1", "true", "yes"}
 
 
 # Cache for plugin zip SHA256 and size to prevent high Disk I/O and CPU overhead
@@ -88,7 +122,7 @@ async def plugin_info(request: Request):
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-05-30",
+        "last_updated": "2026-06-03",
     })
 
 
@@ -134,9 +168,78 @@ def _plugin_update_response(download_url: str, package_sha256: str, signature: s
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-05-30",
+        "last_updated": "2026-06-03",
         "description": "Official Buykori AdSync WordPress plugin for server-side Facebook CAPI, TikTok, and GA4 tracking with one-page landing support and deferred purchase control.",
         "changelog": (
+            "<h4>v1.2.32</h4><ul>"
+            "<li>Simplified the WordPress settings UI for client-facing setup</li>"
+            "<li>Added a compact connection status summary with account, website, and tracking state</li>"
+            "<li>Collapsed optional browser pixel backup and diagnostics behind support-oriented details</li>"
+            "</ul>"
+            "<h4>v1.2.31</h4><ul>"
+            "<li>Added WordPress installation fingerprinting for connected-site validation</li>"
+            "<li>Added server-side active binding checks during event ingestion to block copied API key/plugin misuse</li>"
+            "<li>Added admin API tools to list, release, and transfer site bindings with audit logs</li>"
+            "<li>Added per-site event throttling when Redis is available</li>"
+            "</ul>"
+            "<h4>v1.2.30</h4><ul>"
+            "<li>Added an active website binding lock so the same root domain or subdomain cannot be connected to multiple Buykori workspaces at the same time</li>"
+            "<li>Blocks second-account plugin connection attempts with a transfer/support message</li>"
+            "<li>Keeps the trial reuse downgrade guard for sites that already used a Growth trial</li>"
+            "</ul>"
+            "<h4>v1.2.29</h4><ul>"
+            "<li>Added a clear plugin warning when a reconnected site has already used a Growth trial and the account is moved to Free</li>"
+            "<li>Improved reconnect safeguards for root domains and subdomains to reduce trial reuse abuse</li>"
+            "<li>Continued simplifying the WordPress settings experience for client-facing setup</li>"
+            "</ul>"
+            "<h4>v1.2.28</h4><ul>"
+            "<li>Simplified the WordPress settings screen by hiding low-resource mode, landing mode, and variation toggles from the main UI</li>"
+            "<li>Added a disconnect action for account-connected sites</li>"
+            "<li>Made smart landing-page detection and variation tracking automatic by default</li>"
+            "<li>Moved catalog matching into Advanced controls for support-led troubleshooting</li>"
+            "</ul>"
+            "<h4>v1.2.27</h4><ul>"
+            "<li>Prevented AddPaymentInfo from firing on checkout page load when WooCommerce preselects a default payment method</li>"
+            "<li>Kept AddPaymentInfo tied to trusted customer payment-method interaction with browser-side deduplication</li>"
+            "</ul>"
+            "<h4>v1.2.26</h4><ul>"
+            "<li>Queued WooCommerce Purchase relay through Action Scheduler so checkout responses are not delayed by gateway calls</li>"
+            "<li>Dispatched the server-side InitiateCheckout fallback without blocking checkout</li>"
+            "<li>Dispatched incomplete-checkout recovery conversion without blocking order creation</li>"
+            "</ul>"
+            "<h4>v1.2.25</h4><ul>"
+            "<li>Fixed incomplete checkout draft capture when no UTM campaign parameters are present</li>"
+            "</ul>"
+            "<h4>v1.2.24</h4><ul>"
+            "<li>Added incomplete checkout recovery capture after a valid Bangladesh phone number is entered</li>"
+            "<li>Automatically marks the matching recovery draft as recovered when WooCommerce creates the order</li>"
+            "</ul>"
+            "<h4>v1.2.23</h4><ul>"
+            "<li>Changed COD landing InitiateCheckout intent to valid phone input or Place Order click instead of email-only activity</li>"
+            "</ul>"
+            "<h4>v1.2.22</h4><ul>"
+            "<li>Recognized CartFlows and embedded checkout widgets as one-page landing contexts so ViewContent can fire for the loaded product</li>"
+            "<li>Generated a fresh InitiateCheckout event ID for each new customer intent while preserving the latest ID for order fallback deduplication</li>"
+            "</ul>"
+            "<h4>v1.2.21</h4><ul>"
+            "<li>Prevented automatic landing-page cart hydration from firing AddToCart conversion events</li>"
+            "<li>Restricted InitiateCheckout to trusted customer input, clicks, and submits instead of synthetic checkout refresh events</li>"
+            "</ul>"
+            "<h4>v1.2.20</h4><ul>"
+            "<li>Published a Linux-safe plugin ZIP with forward-slash archive paths</li>"
+            "<li>Removed the redundant post-install folder move that could break activation after an update</li>"
+            "</ul>"
+            "<h4>v1.2.19</h4><ul>"
+            "<li>Added server-side WooCommerce AddToCart CAPI tracking with a session receipt queue</li>"
+            "<li>Added browser Pixel receipt synchronization for classic AJAX, WooCommerce Blocks, and redirect add-to-cart flows</li>"
+            "<li>Added shared AddToCart event IDs for Pixel and CAPI deduplication</li>"
+            "<li>Tightened one-page ViewContent visibility and InitiateCheckout field intent rules</li>"
+            "</ul>"
+            "<h4>v1.2.18</h4><ul>"
+            "<li>Added smart auto-detection for native WooCommerce, embedded checkout, Elementor, and CartFlows landing pages</li>"
+            "<li>Restored PageView tracking across checkout and thank-you pages</li>"
+            "<li>Added cached-page REST retry handling and WooCommerce Blocks cart reconciliation</li>"
+            "</ul>"
             "<h4>v1.2.17</h4><ul>"
             "<li>Rebuilt and republished the plugin package so stores on 1.2.16 can update cleanly</li>"
             "</ul>"
@@ -298,10 +401,151 @@ def _generate_preconfigured_zip(api_key: str, gateway_url: str) -> io.BytesIO:
                     )
                     content = text.encode("utf-8")
 
+                content = protect_plugin_package_content(
+                    arc_name,
+                    content,
+                    enabled=PLUGIN_PROTECTED_PACKAGE,
+                )
                 zf.writestr(arc_name, content)
 
-    buf.seek(0)
-    return buf
+    payload = buf.getvalue()
+    if len(_PRECONFIGURED_ZIP_CACHE) >= 128:
+        _PRECONFIGURED_ZIP_CACHE.pop(next(iter(_PRECONFIGURED_ZIP_CACHE)))
+    _PRECONFIGURED_ZIP_CACHE[cache_key] = payload
+    return io.BytesIO(payload)
+
+
+@router.post(
+    "/plugin/connect/exchange",
+    summary="Exchange a one-time plugin connect code for WordPress configuration",
+    include_in_schema=False,
+)
+async def plugin_connect_exchange(
+    request: Request,
+    payload: PluginConnectExchangeRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    code = validate_token(payload.code, "code")
+    code_verifier = validate_token(payload.codeVerifier, "code verifier")
+    state = validate_token(payload.state, "state")
+    _, site_host = normalize_site_url(payload.siteUrl)
+
+    result = await db.execute(
+        select(PluginConnectSession).where(PluginConnectSession.code_hash == sha256_hex(code))
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=401, detail="Invalid connect code.")
+    if session.used_at is not None:
+        raise HTTPException(status_code=409, detail="Connect code has already been used.")
+
+    now = datetime.now(timezone.utc)
+    expires_at = session.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < now:
+        raise HTTPException(status_code=410, detail="Connect code has expired.")
+    if not hmac.compare_digest(session.state, state):
+        raise HTTPException(status_code=403, detail="Invalid connect state.")
+    if session.site_host != site_host:
+        raise HTTPException(status_code=403, detail="Connect site mismatch.")
+    if not hmac.compare_digest(session.code_challenge, pkce_challenge(code_verifier)):
+        raise HTTPException(status_code=403, detail="Invalid code verifier.")
+
+    client_r = await db.execute(select(Client).where(Client.id == session.client_id))
+    client = client_r.scalar_one_or_none()
+    if not client or not client.is_active:
+        raise HTTPException(status_code=403, detail="Client account is inactive.")
+
+    plan_warning = ""
+    if trial_active(client, now):
+        conflict = await find_trial_identity_conflict(
+            db,
+            domain=session.site_host,
+            exclude_client_id=client.id,
+        )
+        if conflict:
+            cancel_to_free(client, now)
+            plan_warning = (
+                "This website has already used a Growth trial. "
+                "Your account was moved to the Free plan. Contact Buykori support to upgrade."
+            )
+            db.add(AuditLog(
+                actor="system",
+                action="plugin_connect_trial_reuse_downgraded",
+                client_id=client.id,
+                ip_address=request.client.host if request.client else None,
+                details=f"site={session.site_host}; conflict_id={conflict.id}",
+            ))
+        else:
+            await record_trial_identity(db, client, source="plugin_connect")
+
+    await upsert_active_site_binding(
+        db,
+        site_host=session.site_host,
+        client_id=client.id,
+        installation_id=(payload.installationId or "").strip()[:128] or None,
+        source="plugin_connect",
+        now=now,
+    )
+    session.used_at = now
+    client.updated_at = now
+    db.add(AuditLog(
+        actor="wordpress_plugin",
+        action="plugin_connect_exchanged",
+        client_id=client.id,
+        ip_address=request.client.host if request.client else None,
+        details=f"site={session.site_host}",
+    ))
+    await db.commit()
+
+    return {
+        "success": True,
+        "client_name": client.name,
+        "site_host": session.site_host,
+        "api_key": client.api_key,
+        "public_key": client.public_key or "",
+        "gateway_url": gateway_url_from_request(request),
+        "plan_warning": plan_warning,
+        "installation_id": (payload.installationId or "").strip()[:128],
+    }
+
+
+@router.post(
+    "/plugin/connect/disconnect",
+    summary="Record a WordPress-side disconnect notification",
+    include_in_schema=False,
+)
+async def plugin_connect_disconnect(
+    request: Request,
+    payload: PluginDisconnectRequest,
+    x_api_key: str = Header("", alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="API key required.")
+    _, site_host = normalize_site_url(payload.siteUrl)
+    result = await db.execute(select(Client).where(Client.api_key == x_api_key, Client.is_active == True))
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=401, detail="Invalid API key.")
+
+    now = datetime.now(timezone.utc)
+    binding = await get_active_site_binding(db, site_host)
+    if binding and int(binding.client_id) == int(client.id):
+        binding.last_seen_at = now
+        if payload.installationId and not binding.installation_id:
+            binding.installation_id = payload.installationId.strip()[:128]
+
+    db.add(AuditLog(
+        actor="wordpress_plugin",
+        action="plugin_disconnect_notified",
+        client_id=client.id,
+        ip_address=request.client.host if request.client else None,
+        details=f"site={site_host}; binding_kept_active=true",
+    ))
+    await db.commit()
+    return {"success": True, "binding_kept_active": True}
 
 
 @router.get(
@@ -334,7 +578,7 @@ async def plugin_download(
             pass
 
     # ── Dynamic pre-configured download ─────────────────────────────────
-    if resolved_api_key:
+    if PLUGIN_PRECONFIGURED_DOWNLOADS and resolved_api_key:
         result = await db.execute(
             select(Client).where(Client.api_key == resolved_api_key)
         )

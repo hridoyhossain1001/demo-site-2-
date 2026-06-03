@@ -4,7 +4,7 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.17
+Stable tag: 1.2.32
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -43,6 +43,59 @@ Buykori AdSync প্লাগইন আপনার WooCommerce স্টোর
 ক্যাশ-অন-ডেলিভারি (COD) অর্ডারের ক্ষেত্রে Purchase ইভেন্ট তখনই Facebook-এ পাঠানো হয় যখন আপনি অর্ডারটি "Completed" করেন। এতে ফেক অর্ডারের ডাটা Facebook-এ যায় না।
 
 == Changelog ==
+
+= 1.2.32 =
+* Simplified the WordPress settings UI for client-facing setup.
+* Added a compact connection status summary with account, website, and tracking state.
+* Renamed reconnect to Switch Buykori Account and connection test to Run Health Check.
+* Collapsed optional browser pixel backup and diagnostics behind support-oriented details.
+
+= 1.2.31 =
+* Added WordPress installation fingerprinting for connected-site validation.
+* Added server-side active binding checks during event ingestion to block copied API key/plugin misuse.
+* Added admin API tools to list, release, and transfer site bindings with audit logs.
+* Added per-site event throttling when Redis is available.
+
+= 1.2.30 =
+* Added an active website binding lock so the same root domain or subdomain cannot be connected to multiple Buykori workspaces at the same time.
+* Blocks second-account plugin connection attempts with a transfer/support message.
+* Keeps the trial reuse downgrade guard for sites that already used a Growth trial.
+
+= 1.2.29 =
+* Added a clear plugin warning when a reconnected site has already used a Growth trial and the account is moved to Free.
+* Improved reconnect safeguards for root domains and subdomains to reduce trial reuse abuse.
+* Continued simplifying the WordPress settings experience for client-facing setup.
+
+= 1.2.28 =
+* Simplified the WordPress settings screen by hiding low-resource mode, landing mode, and variation toggles from the main UI.
+* Added a disconnect action for account-connected sites.
+* Made smart landing-page detection and variation tracking automatic by default.
+* Moved catalog matching into Advanced controls for support-led troubleshooting.
+
+= 1.2.27 =
+* Prevented AddPaymentInfo from firing on checkout page load when WooCommerce preselects a default payment method.
+* Kept AddPaymentInfo tied to trusted customer payment-method interaction with browser-side deduplication.
+
+= 1.2.26 =
+* Queued WooCommerce Purchase relay through Action Scheduler so checkout responses are not delayed by gateway calls
+* Dispatched the server-side InitiateCheckout fallback without blocking checkout
+* Dispatched incomplete-checkout recovery conversion without blocking order creation
+
+= 1.2.19 =
+* Added server-side WooCommerce AddToCart CAPI tracking with a session receipt queue
+* Added browser Pixel receipt synchronization for classic AJAX, WooCommerce Blocks, and redirect add-to-cart flows
+* Added shared AddToCart event IDs based on visitor, cart item key, and session counter for Pixel and CAPI deduplication
+* Tightened one-page ViewContent so visible product or order-summary surfaces are required
+* Tightened one-page InitiateCheckout field intent to require a valid email or phone number
+
+= 1.2.18 =
+* Added smart auto-detection for native WooCommerce, embedded checkout, Elementor, and CartFlows landing pages
+* Restored PageView tracking across checkout and thank-you pages
+* Added cart-session and DOM product resolution for one-page ViewContent tracking
+* Added WooCommerce Blocks cart reconciliation through wc-blocks_added_to_cart and the Store API
+* Added stable browser event IDs with REST retry reuse for cleaner Pixel and CAPI deduplication
+* Made same-origin REST tracking resilient to stale nonces on cached landing pages
+* Tightened InitiateCheckout intent tracking by removing focus-only and coupon-button triggers
 
 = 1.2.17 =
 * Rebuilt and republished the plugin package so stores on 1.2.16 can update cleanly.
@@ -154,6 +207,7 @@ Buykori AdSync প্লাগইন আপনার WooCommerce স্টোর
 * Improved client setup instructions
 
 = 1.1.0 =
+* Note: v1.2.26 moves checkout-time Purchase relay into Action Scheduler while retaining response verification in the scheduled worker.
 * 🔒 Purchase event এখন blocking request — response verify করে success/failure ট্র্যাক করে
 * 🔒 Phone number normalization ফিক্স — Python সার্ভারের সাথে hash matching ১০০% accurate
 * 🔒 404 response আর success হিসেবে ধরা হয় না — proper error handling
