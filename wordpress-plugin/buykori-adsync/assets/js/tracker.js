@@ -86,11 +86,18 @@
     function isOnePageMode() {
         if (trackingMode === 'one_page') return true;
         if (trackingMode === 'standard') return false;
+        if (isExplicitCheckoutPage()) return false;
         return resolvePageContext() === 'embedded_one_page_checkout';
     }
 
     function bodyHasClass(name) {
         return !!(document.body && document.body.classList && document.body.classList.contains(name));
+    }
+
+    function isExplicitCheckoutPage() {
+        var path = (window.location && window.location.pathname ? window.location.pathname : '').toLowerCase();
+        if (cfg.page_type === 'checkout' || !!pageContext.has_checkout || bodyHasClass('woocommerce-checkout')) return true;
+        return !!(path.match(/checkout|checkouts|order-pay|\/step\/checkout/) && !path.match(/order-received|thank-you/));
     }
 
     function hasProductDetailSurface() {
@@ -123,6 +130,7 @@
         var hasProductList = !!pageContext.has_product_listing || hasProductListSurface();
 
         if (pageContext.is_thankyou || isThankYouFlowPage()) return 'thank_you';
+        if (isExplicitCheckoutPage()) return 'standard_checkout';
         if (hasCheckout && (hasEmbeddedCheckout || hasProduct || hasProductList || !!cfg.product)) {
             return 'embedded_one_page_checkout';
         }
@@ -1063,6 +1071,7 @@
     function sendViewContentOnce() {
         refreshResolvedContext();
         if (!cfg.events || !cfg.events.viewcontent) return;
+        if (trackingMode !== 'one_page' && isExplicitCheckoutPage()) return;
         if (resolvedContext !== 'native_product' && resolvedContext !== 'embedded_one_page_checkout') return;
         if (!discoverLandingProduct()) return;
         if (!eventOnce('ViewContent:' + String(cfg.product.id || '') + ':' + currentPathKey(), 1800)) return;
@@ -1181,6 +1190,7 @@
 
     function observeLandingProductCards() {
         if (!cfg.events || !cfg.events.viewcontent || !isOnePageMode() || typeof IntersectionObserver === 'undefined') return;
+        if (trackingMode !== 'one_page' && isExplicitCheckoutPage()) return;
         if (cfg.page_type === 'product' && cfg.product) return;
         var selector = [
             '[data-buykori-product]',
@@ -1569,10 +1579,10 @@
     }
 
     function sendInitiateCheckoutOnSurface(reason) {
-        if (isOnePageMode()) return;
-        if (isThankYouFlowPage()) return;
-        if (!hasCheckoutSurface()) return;
-        sendInitiateCheckoutWhenReady(reason || 'checkout_surface_ready', hasCheckoutCartData());
+        // Checkout/shipping page visibility is not enough conversion intent.
+        // Real InitiateCheckout should wait for trusted customer input, place order,
+        // or checkout form submission so multi-step stores do not fire on page load.
+        return;
     }
 
     function scheduleCheckoutSurfaceChecks(prefix) {
@@ -1634,7 +1644,7 @@
                 sendInitiateCheckoutWhenReady('place_order_click', true, true);
             }
             if (e.target.closest('.checkout-button, .wc-forward[href*="checkout"], a[href*="checkout"], [data-buykori-checkout], [data-buykori-checkout-intent], .buykorigw-checkout-intent, .wcf-next-button, .wcf-embed-checkout-form button[type="submit"]')) {
-                sendInitiateCheckoutWhenReady('checkout_button_click', hasCheckoutCartData(), true);
+                sendInitiateCheckoutWhenReady('checkout_button_click', false, true);
             }
         }, true);
         document.addEventListener('submit', function(e) {
