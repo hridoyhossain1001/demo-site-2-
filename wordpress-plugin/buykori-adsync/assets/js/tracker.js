@@ -482,6 +482,14 @@
         setCookieLocal('_buykorigw_ic_event_id', '', -1);
     }
 
+    var initiateCheckoutGuardSeconds = 20 * 60;
+
+    function hasRecentInitiateCheckoutMarker() {
+        var timestamp = parseInt(getCookie('_buykorigw_ic_sent') || '0', 10);
+        if (!timestamp) return false;
+        return Math.abs(Math.floor(Date.now() / 1000) - timestamp) <= initiateCheckoutGuardSeconds;
+    }
+
     var lastAddToCartIntentAt = 0;
 
     function markAddToCartIntent() {
@@ -1536,6 +1544,10 @@
         if (!cfg.events || !cfg.events.checkout) return;
         if (isThankYouFlowPage()) return;
         if (initiateCheckoutSent) return;
+        if (hasRecentInitiateCheckoutMarker()) {
+            initiateCheckoutSent = true;
+            return;
+        }
         initiateCheckoutSent = true;
         sendEvent('InitiateCheckout', checkoutPayload(reason), !!synchronous);
     }
