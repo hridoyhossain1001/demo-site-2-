@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useEffect, use } from "react";
+import React, { useState, useEffect } from "react";
+import { useParams } from "next/navigation";
 
 const products = {
   1: {
@@ -21,10 +22,9 @@ const products = {
   },
 };
 
-export default function ProductDetail({ params }) {
-  // Unwrap params using React.use() to comply with Next.js 15 routing rules
-  const resolvedParams = use(params);
-  const productId = parseInt(resolvedParams.id) || 1;
+export default function ProductDetail() {
+  const params = useParams();
+  const productId = parseInt(params.id) || 1;
   const product = products[productId];
 
   const [qty, setQty] = useState(1);
