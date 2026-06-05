@@ -610,6 +610,14 @@ function buykorigw_settings_page() {
                                value="<?php echo esc_attr( $settings['tt_pixel_id'] ?? '' ); ?>"
                                placeholder="যেমন: C1234567890ABC">
                     </div>
+                    <?php if ( ! empty( $settings['enable_hybrid'] ) && ( ! empty( $settings['fb_pixel_id'] ) || ! empty( $settings['tt_pixel_id'] ) ) ) : ?>
+                    <div class="buykorigw-warning-box" style="margin-top:12px;">
+                        <strong>Multi-store catalog notice:</strong> If the same Pixel ID is used across multiple stores,
+                        every store should send product IDs that match the connected Meta/TikTok catalog feed.
+                        For shared catalogs, prefer globally unique SKUs or store-prefixed catalog IDs. Using different
+                        formats per store does not automatically prevent product collisions.
+                    </div>
+                    <?php endif; ?>
                     </details>
                 </div>
 
@@ -785,6 +793,18 @@ function buykorigw_settings_page() {
                                 <label>Write extra troubleshooting logs</label>
                             </div>
                         </div>
+                    </details>
+                    <details class="buykorigw-advanced-details">
+                        <summary>Content ID local preview</summary>
+                        <p class="description">
+                            Preview the product IDs this plugin will send and catch local SKU issues. This does not connect
+                            to Meta/TikTok catalog APIs, so still verify that your catalog feed uses the same IDs.
+                            Current format: <strong><?php echo esc_html( ($settings['content_id_format'] ?? 'id') === 'sku' ? 'SKU' : 'Database ID' ); ?></strong>
+                        </p>
+                        <button type="button" class="buykorigw-btn buykorigw-btn-secondary" id="buykorigw-content-id-check" data-buykorigw-content-id-check>
+                            Preview Content IDs
+                        </button>
+                        <div id="buykorigw-content-id-status" class="buykorigw-status"></div>
                     </details>
                 </div>
 

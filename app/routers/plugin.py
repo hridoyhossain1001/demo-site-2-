@@ -53,7 +53,7 @@ class PluginDisconnectRequest(BaseModel):
 
 # Plugin version এই ফাইলে hardcoded — PLUGIN_VERSION env var দিয়ে override করা যায়।
 # Update করার সময় এখানে version change করুন এবং WP plugin-এও update করুন।
-PLUGIN_VERSION = "1.2.41"
+PLUGIN_VERSION = "1.2.42"
 PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "wordpress-plugin" / "buykori-adsync"
 PLUGIN_ZIP_PATH = Path(
     os.getenv(
@@ -122,7 +122,7 @@ async def plugin_info(request: Request):
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-06-04",
+        "last_updated": "2026-06-05",
     })
 
 
@@ -168,9 +168,15 @@ def _plugin_update_response(download_url: str, package_sha256: str, signature: s
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-06-04",
+        "last_updated": "2026-06-05",
         "description": "Official Buykori AdSync WordPress plugin for server-side Facebook CAPI, TikTok, and GA4 tracking with one-page landing support and deferred purchase control.",
         "changelog": (
+            "<h4>v1.2.42</h4><ul>"
+            "<li>Tightened AddToCart detection for page-builder buttons and avoided quantity-control false positives</li>"
+            "<li>Improved variation fallback so hidden or global variation inputs are not picked by mistake</li>"
+            "<li>Added FunnelKit, WooFunnels, and CartFlows checkout detection without fragile class checks</li>"
+            "<li>Added a local Content ID preview tool with SKU/duplicate warnings and clearer catalog guidance</li>"
+            "</ul>"
             "<h4>v1.2.41</h4><ul>"
             "<li>Sends TikTok PageView through the browser pixel using ttq.page() while keeping server-side TikTok delivery for supported commerce events</li>"
             "</ul>"

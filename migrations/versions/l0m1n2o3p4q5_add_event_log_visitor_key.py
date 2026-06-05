@@ -17,18 +17,36 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_column(table_name: str, column_name: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    return any(column["name"] == column_name for column in inspector.get_columns(table_name))
+
+
+def _has_index(table_name: str, index_name: str) -> bool:
+    inspector = sa.inspect(op.get_bind())
+    return any(index["name"] == index_name for index in inspector.get_indexes(table_name))
+
+
 def upgrade() -> None:
-    op.add_column("event_logs", sa.Column("visitor_key", sa.String(length=80), nullable=True))
-    op.create_index(op.f("ix_event_logs_visitor_key"), "event_logs", ["visitor_key"], unique=False)
-    op.create_index(
-        "ix_event_logs_visitor_funnel",
-        "event_logs",
-        ["client_id", "geo_district", "event_name", "visitor_key", "created_at"],
-        unique=False,
-    )
+    if not _has_column("event_logs", "visitor_key"):
+        op.add_column("event_logs", sa.Column("visitor_key", sa.String(length=80), nullable=True))
+
+    if not _has_index("event_logs", "ix_event_logs_visitor_key"):
+        op.create_index(op.f("ix_event_logs_visitor_key"), "event_logs", ["visitor_key"], unique=False)
+
+    if not _has_index("event_logs", "ix_event_logs_visitor_funnel"):
+        op.create_index(
+            "ix_event_logs_visitor_funnel",
+            "event_logs",
+            ["client_id", "geo_district", "event_name", "visitor_key", "created_at"],
+            unique=False,
+        )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_event_logs_visitor_funnel", table_name="event_logs")
-    op.drop_index(op.f("ix_event_logs_visitor_key"), table_name="event_logs")
-    op.drop_column("event_logs", "visitor_key")
+    if _has_index("event_logs", "ix_event_logs_visitor_funnel"):
+        op.drop_index("ix_event_logs_visitor_funnel", table_name="event_logs")
+    if _has_index("event_logs", "ix_event_logs_visitor_key"):
+        op.drop_index(op.f("ix_event_logs_visitor_key"), table_name="event_logs")
+    if _has_column("event_logs", "visitor_key"):
+        op.drop_column("event_logs", "visitor_key")

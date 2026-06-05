@@ -94,6 +94,18 @@
         return !!(document.body && document.body.classList && document.body.classList.contains(name));
     }
 
+    function elementIsHidden(el) {
+        var node = el;
+        while (node && node !== document.body) {
+            try {
+                var style = window.getComputedStyle(node);
+                if (style.display === 'none' || style.visibility === 'hidden') return true;
+            } catch(e) {}
+            node = node.parentElement;
+        }
+        return false;
+    }
+
     function isExplicitCheckoutPage() {
         var path = (window.location && window.location.pathname ? window.location.pathname : '').toLowerCase();
         if (trackingMode === 'one_page') return false;
@@ -129,13 +141,15 @@
     function resolvePageContext() {
         var hasEmbeddedCheckout = !!document.querySelector(
             '.wcf-embed-checkout-form, .cartflows-checkout, .cartflows-container, ' +
-            '[data-block-name="woocommerce/checkout"], .wp-block-woocommerce-checkout, .wc-block-checkout'
+            '[data-block-name="woocommerce/checkout"], .wp-block-woocommerce-checkout, .wc-block-checkout, ' +
+            '.wfacp_main_form, .wfacp-form, .wfacp_checkout_form, .fk-checkout-form, [data-funnelkit-checkout]'
         );
         var hasCheckout = !!pageContext.has_checkout || !!document.querySelector(
             'form.checkout, form.woocommerce-checkout, .woocommerce-checkout, .wc-block-checkout, ' +
             '[data-block-name="woocommerce/checkout"], #customer_details, #order_review, #place_order, ' +
             '.wc-block-components-checkout-place-order-button, .wcf-embed-checkout-form, .cartflows-checkout, ' +
-            '.wp-block-woocommerce-checkout, .wc-block-checkout__form, form[name="checkout"]'
+            '.wp-block-woocommerce-checkout, .wc-block-checkout__form, form[name="checkout"], ' +
+            '.wfacp_main_form, .wfacp-form, .wfacp_checkout_form, .fk-checkout-form'
         );
         var hasProduct = !!pageContext.has_product || hasProductDetailSurface();
         var hasProductList = !!pageContext.has_product_listing || hasProductListSurface();
@@ -160,7 +174,61 @@
     function getSelectedVariationInfo() {
         if (!cfg.enable_variations) return null;
         var form = document.querySelector('form.cart.variations_form');
-        if (!form) return null;
+        if (!form) {
+            // Fallback: detect variation_id input outside standard WC form
+            // (custom page builders, Elementor, Divi, etc.)
+            var fallbackInputs = document.querySelectorAll(
+                'input[name="variation_id"], .variation_id, ' +
+                '[data-variation-id], [data-buykori-variation]'
+            );
+            var anyVarInput = null;
+            var fallbackRoot = null;
+            Array.prototype.some.call(fallbackInputs, function(input) {
+                var candidateId = input.value ||
+                    input.getAttribute('data-variation-id') ||
+                    input.getAttribute('data-buykori-variation') ||
+                    '';
+                if (!candidateId || candidateId === '0') return false;
+                var root = input.closest(
+                    'form.cart, .product, [data-product_id], [data-product-id], ' +
+                    '[data-buykori-product], .elementor-add-to-cart, .brxe-add-to-cart, ' +
+                    '.oxy-add-to-cart, .jet-woo-builder-addtocart'
+                ) || input.parentElement;
+                if (!root || elementIsHidden(root)) return false;
+                anyVarInput = input;
+                fallbackRoot = root;
+                return true;
+            });
+            if (!anyVarInput) return null;
+            var fallbackVarId = anyVarInput.value ||
+                anyVarInput.getAttribute('data-variation-id') ||
+                anyVarInput.getAttribute('data-buykori-variation') ||
+                '';
+            if (!fallbackVarId || fallbackVarId === '0') return null;
+            var fallbackPrice = null;
+            var priceEl = fallbackRoot ? fallbackRoot.querySelector(
+                '.woocommerce-variation-price .amount, ' +
+                '.price ins .amount, .price > .amount, ' +
+                '[data-buykori-variation-price]'
+            ) : null;
+            if (priceEl) {
+                var priceAttr = priceEl.getAttribute('data-buykori-variation-price');
+                fallbackPrice = priceAttr ? parseFloat(priceAttr) : parsePrice(priceEl.textContent);
+            }
+            var fallbackAttributes = {};
+            if (fallbackRoot) {
+                fallbackRoot.querySelectorAll('select[name^="attribute_"], input[type="radio"][name^="attribute_"]:checked, input[type="hidden"][name^="attribute_"]').forEach(function(field) {
+                    var name = String(field.name || '').replace('attribute_', '');
+                    if (name && field.value) fallbackAttributes[name] = field.value;
+                });
+            }
+            return {
+                id: fallbackVarId,
+                sku: null,
+                price: fallbackPrice,
+                attributes: fallbackAttributes
+            };
+        }
         var varIdInput = form.querySelector('[name="variation_id"], .variation_id');
         if (!varIdInput) return null;
         var variationId = varIdInput.value;
@@ -1292,6 +1360,21 @@
     if (cfg.events && cfg.events.addtocart) {
         var addToCartFiredViaAjax = false;
 
+        function hasAddToCartProductCue(btn) {
+            if (!btn || !btn.matches) return false;
+            if (btn.matches('.quantity button, .quantity input, .qty, .plus, .minus, .wc-block-components-quantity-selector__button, [data-quantity-control], [name="quantity"]')) {
+                return false;
+            }
+            if (btn.matches('.add_to_cart_button, .single_add_to_cart_button, [name="add-to-cart"], [data-buykori-addtocart], [data-buykori-atc], .buykorigw-addtocart-intent, .wc-block-components-product-button__button, a[href*="add-to-cart="], button[value][name="add-to-cart"], input[value][name="add-to-cart"], button.product_type_simple, .wp-element-button.add_to_cart_button')) {
+                return true;
+            }
+            var form = btn.closest('form.cart');
+            if (form && (form.querySelector('[name="add-to-cart"], [name="product_id"], input[name="variation_id"]') || cfg.product)) {
+                return true;
+            }
+            return !!btn.closest('.jet-woo-builder-addtocart, .oxy-add-to-cart, .brxe-add-to-cart, .elementor-add-to-cart, [data-product_id], [data-product-id], [data-buykori-product]');
+        }
+
         // Mark real user intent before WooCommerce or a landing builder starts
         // its cart request. Automatic cart hydration must not count as AddToCart.
         document.addEventListener('click', function(e) {
@@ -1300,9 +1383,15 @@
                 '.add_to_cart_button, .single_add_to_cart_button, [name="add-to-cart"], ' +
                 '[data-buykori-addtocart], [data-buykori-atc], .buykorigw-addtocart-intent, ' +
                 '.wc-block-components-product-button__button, a[href*="add-to-cart="], ' +
-                'button[value][name="add-to-cart"], input[value][name="add-to-cart"]'
+                'button[value][name="add-to-cart"], input[value][name="add-to-cart"], ' +
+                'form.cart button[type="submit"], form.cart input[type="submit"], ' +
+                '.jet-woo-builder-addtocart button[type="submit"], .jet-woo-builder-addtocart input[type="submit"], ' +
+                '.oxy-add-to-cart button[type="submit"], .oxy-add-to-cart input[type="submit"], ' +
+                '.brxe-add-to-cart button[type="submit"], .brxe-add-to-cart input[type="submit"], ' +
+                '.elementor-add-to-cart button[type="submit"], .elementor-add-to-cart input[type="submit"], ' +
+                'button.product_type_simple, .wp-element-button.add_to_cart_button'
             );
-            if (btn) markAddToCartIntent();
+            if (btn && hasAddToCartProductCue(btn)) markAddToCartIntent();
         }, true);
 
         // jQuery AJAX event — most reliable (fires AFTER WooCommerce confirms add)
@@ -1392,9 +1481,16 @@
         document.addEventListener('click', function(e) {
             var btn = e.target.closest(
                 '.add_to_cart_button, .single_add_to_cart_button, [name="add-to-cart"], ' +
-                '.wc-block-components-product-button__button, a[href*="add-to-cart="]'
+                '.wc-block-components-product-button__button, a[href*="add-to-cart="], ' +
+                'form.cart button[type="submit"], form.cart input[type="submit"], ' +
+                '.jet-woo-builder-addtocart button[type="submit"], .jet-woo-builder-addtocart input[type="submit"], ' +
+                '.oxy-add-to-cart button[type="submit"], .oxy-add-to-cart input[type="submit"], ' +
+                '.brxe-add-to-cart button[type="submit"], .brxe-add-to-cart input[type="submit"], ' +
+                '.elementor-add-to-cart button[type="submit"], .elementor-add-to-cart input[type="submit"], ' +
+                'button.product_type_simple, .wp-element-button.add_to_cart_button'
             );
             if (!btn) return;
+            if (!hasAddToCartProductCue(btn)) return;
 
             // AJAX-enabled button
             if (btn.classList.contains('ajax_add_to_cart')) return;
@@ -1624,7 +1720,7 @@
 
     function hasCheckoutSurface() {
         return !!(
-            document.querySelector('body.woocommerce-checkout, form.checkout, form.woocommerce-checkout, form[name="checkout"], .woocommerce-checkout, .wc-block-checkout, #customer_details, #order_review, #place_order, .wcf-embed-checkout-form, .cartflows-checkout, [data-block-name="woocommerce/checkout"], .wp-block-woocommerce-checkout, .wc-block-checkout__form')
+            document.querySelector('body.woocommerce-checkout, form.checkout, form.woocommerce-checkout, form[name="checkout"], .woocommerce-checkout, .wc-block-checkout, #customer_details, #order_review, #place_order, .wcf-embed-checkout-form, .cartflows-checkout, [data-block-name="woocommerce/checkout"], .wp-block-woocommerce-checkout, .wc-block-checkout__form, .wfacp_main_form, .wfacp-form, .wfacp_checkout_form, .fk-checkout-form')
             || document.querySelector('#billing_email, #billing_phone, input[name="billing_email"], input[name="billing_phone"]')
         );
     }
@@ -1651,7 +1747,13 @@
             '.wcf-embed-checkout-form input',
             '.wcf-embed-checkout-form select',
             '.cartflows-checkout input',
-            '.cartflows-checkout select'
+            '.cartflows-checkout select',
+            '.wfacp_main_form input',
+            '.wfacp_main_form select',
+            '.wfacp-form input',
+            '.wfacp-form select',
+            '.fk-checkout-form input',
+            '.fk-checkout-form select'
         ].join(', ');
 
         function maybeFireFromField(e) {
@@ -1713,7 +1815,7 @@
         if (isThankYouFlowPage()) return false;
         if (cfg.page_type === 'checkout' || !!pageContext.has_checkout || bodyHasClass('woocommerce-checkout')) return true;
         var path = (window.location && window.location.pathname ? window.location.pathname : '').toLowerCase();
-        if (path.match(/checkout|checkouts|order-pay/) && !path.match(/order-received|thank-you/)) return true;
+        if (path.match(/checkout|checkouts|order-pay|\/step\/|\/fk-checkout\//) && !path.match(/order-received|thank-you/)) return true;
         return hasCheckoutSurface();
     }
 

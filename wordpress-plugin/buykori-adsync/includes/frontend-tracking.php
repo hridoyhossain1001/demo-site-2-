@@ -86,9 +86,26 @@ function buykorigw_current_page_is_wc_page( $page_key ) {
 }
 
 function buykorigw_is_checkout_context() {
-    return ( function_exists( 'is_checkout' ) && is_checkout() )
+    $standard = ( function_exists( 'is_checkout' ) && is_checkout() )
         || buykorigw_current_page_is_wc_page( 'checkout' )
         || buykorigw_current_post_has_shortcode( array( 'woocommerce_checkout' ) );
+
+    if ( $standard ) {
+        return true;
+    }
+
+    // FunnelKit / WooFunnels checkout detection. Keep this shortcode-based so
+    // minor plugin class-name changes do not break checkout context detection.
+    if ( buykorigw_current_post_has_shortcode( array( 'wfacp_forms', 'wfacp_form', 'fk_checkout', 'funnelkit_checkout' ) ) ) {
+        return true;
+    }
+
+    // CartFlows checkout detection
+    if ( buykorigw_current_post_has_shortcode( array( 'cartflows_checkout' ) ) ) {
+        return true;
+    }
+
+    return false;
 }
 
 function buykorigw_is_cart_context() {

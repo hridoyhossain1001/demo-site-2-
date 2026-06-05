@@ -4,7 +4,7 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.41
+Stable tag: 1.2.42
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -43,6 +43,12 @@ Buykori AdSync প্লাগইন আপনার WooCommerce স্টোর
 ক্যাশ-অন-ডেলিভারি (COD) অর্ডারের ক্ষেত্রে Purchase ইভেন্ট তখনই Facebook-এ পাঠানো হয় যখন আপনি অর্ডারটি "Completed" করেন। এতে ফেক অর্ডারের ডাটা Facebook-এ যায় না।
 
 == Changelog ==
+
+= 1.2.42 =
+* Tightened AddToCart detection for page-builder buttons and avoided quantity-control false positives.
+* Improved variation fallback so hidden/global variation inputs are not picked by mistake.
+* Added FunnelKit/WooFunnels/CartFlows checkout detection without fragile class checks.
+* Added a local Content ID preview tool with SKU/duplicate warnings and clearer catalog guidance.
 
 = 1.2.41 =
 * Sends TikTok PageView through the browser pixel using ttq.page() while keeping server-side TikTok delivery for supported commerce events.

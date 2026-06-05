@@ -36,6 +36,9 @@
       return;
     }
     button.disabled = false;
+    if (button.id === 'buykorigw-content-id-check') {
+      label = 'Preview Content IDs';
+    }
     button.textContent = label;
   }
 
@@ -178,10 +181,82 @@
     });
   }
 
+  function bindContentIdCheck() {
+    var button = document.getElementById('buykorigw-content-id-check');
+    if (!button) {
+      return;
+    }
+
+    button.addEventListener('click', function () {
+      var status = document.getElementById('buykorigw-content-id-status');
+      button.disabled = true;
+      button.textContent = 'Previewing...';
+      resetStatus(status);
+
+      postAdminAjax('buykorigw_check_content_ids')
+        .then(function (data) {
+          if (!data.success) {
+            setStatus(status, 'error', data.data || 'Check failed.');
+            return;
+          }
+
+          var result = data.data;
+          var previewHtml = '<div style="margin-top:10px;">';
+          previewHtml += '<p><strong>Format:</strong> ' + (result.format === 'sku' ? 'SKU' : 'Database ID');
+          previewHtml += ' &nbsp;|&nbsp; <strong>Scanned:</strong> ' + result.total_checked + ' products';
+          if (result.scan_limited) {
+            previewHtml += ' <span style="color:#646970;">(latest ' + result.sample_limit + ' sample)</span>';
+          }
+          if (result.warning_count > 0) {
+            previewHtml += ' &nbsp;|&nbsp; <span style="color:#d63638;">' + result.warning_count + ' local warnings</span>';
+          } else {
+            previewHtml += ' &nbsp;|&nbsp; <span style="color:#00a32a;">No local SKU/duplicate issues in scanned products</span>';
+          }
+          previewHtml += '</p>';
+          if (result.summary) {
+            previewHtml += '<p style="color:#646970;margin-top:0;">' + escHtml(result.summary) + '</p>';
+          }
+          previewHtml += '<table style="width:100%;border-collapse:collapse;font-size:13px;">';
+          previewHtml += '<tr style="background:#f0f0f1;"><th style="padding:6px 8px;text-align:left;">Product</th>';
+          previewHtml += '<th style="padding:6px 8px;text-align:left;">SKU</th>';
+          previewHtml += '<th style="padding:6px 8px;text-align:left;">Content ID</th>';
+          previewHtml += '<th style="padding:6px 8px;text-align:left;">Issue</th></tr>';
+          (result.products || []).forEach(function (p) {
+            var rowStyle = p.issue ? 'background:#fcf0f1;' : '';
+            previewHtml += '<tr style="border-bottom:1px solid #e0e0e0;' + rowStyle + '">';
+            previewHtml += '<td style="padding:5px 8px;">' + escHtml(p.name) + '</td>';
+            previewHtml += '<td style="padding:5px 8px;font-family:monospace;">' + escHtml(p.sku || '-') + '</td>';
+            previewHtml += '<td style="padding:5px 8px;font-family:monospace;">' + escHtml(p.content_id) + '</td>';
+            previewHtml += '<td style="padding:5px 8px;color:#d63638;">' + escHtml(p.issue || '-') + '</td>';
+            previewHtml += '</tr>';
+          });
+          previewHtml += '</table></div>';
+          if (status) {
+            status.className = 'buykorigw-status';
+            status.innerHTML = previewHtml;
+            status.style.display = 'block';
+          }
+        })
+        .catch(function (error) {
+          setStatus(status, 'error', 'Network error: ' + error.message);
+        })
+        .finally(function () {
+          restoreButton(button, '🔍 Check Content IDs');
+        });
+    });
+  }
+
+  function escHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str || ''));
+    return div.innerHTML;
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     bindTabs();
     bindDisconnectConfirm();
     bindHealthCheck();
     bindUpdateCheck();
+    bindContentIdCheck();
   });
 })();

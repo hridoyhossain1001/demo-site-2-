@@ -3,7 +3,7 @@
  * Plugin Name:       Buykori AdSync — Server-Side Tracking
  * Plugin URI:        https://buykori.app/
  * Description:       Server-Side Facebook CAPI, TikTok, and GA4 tracking for WooCommerce with one-page landing support, SHA-256 PII hashing, and deferred purchase control.
- * Version:           1.2.41
+ * Version:           1.2.42
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Buykori AdSync
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 // ─── Plugin Constants ──────────────────────────────────────────────────────────
-define('BUYKORIGW_VERSION', '1.2.41');
+define('BUYKORIGW_VERSION', '1.2.42');
 define('BUYKORIGW_OPTIONAL_EVENTS_POLICY_VERSION', '1.2.33');
 
 define('BUYKORIGW_PLUGIN_FILE', __FILE__);
@@ -865,6 +865,98 @@ function buykorigw_server_add_to_cart($cart_item_key, $product_id, $quantity, $v
         'created_at' => time(),
     );
     buykorigw_set_atc_receipt_queue($queue);
+}
+
+// ─── AJAX: Content ID Health Check (Diagnostic) ─────────────────────────────────
+add_action('wp_ajax_buykorigw_check_content_ids', 'buykorigw_check_content_ids');
+
+function buykorigw_check_content_ids()
+{
+    check_ajax_referer('buykorigw_nonce', 'nonce');
+
+    if (!current_user_can('manage_options')) {
+        wp_send_json_error('Permission denied');
+    }
+
+    if (!function_exists('wc_get_products')) {
+        wp_send_json_error('WooCommerce is not active.');
+    }
+
+    $settings = buykorigw_get_settings();
+    $format = isset($settings['content_id_format']) && $settings['content_id_format'] === 'sku' ? 'sku' : 'id';
+    $sample_limit = 100;
+
+    $products = wc_get_products(array(
+        'limit'   => $sample_limit,
+        'status'  => 'publish',
+        'orderby' => 'date',
+        'order'   => 'DESC',
+        'type'    => array('simple', 'variable', 'variation', 'grouped', 'external'),
+    ));
+
+    $results           = array();
+    $warning_count     = 0;
+    $missing_sku_count = 0;
+    $duplicate_count   = 0;
+    $content_id_counts = array();
+
+    foreach ($products as $product) {
+        $id   = $product->get_id();
+        $sku  = trim((string) $product->get_sku());
+        $name = wp_strip_all_tags($product->get_name());
+
+        $content_id = ($format === 'sku' && $sku !== '') ? $sku : (string) $id;
+
+        if (!isset($content_id_counts[$content_id])) {
+            $content_id_counts[$content_id] = 0;
+        }
+        $content_id_counts[$content_id]++;
+
+        $results[] = array(
+            'product_id' => $id,
+            'name'       => $name,
+            'sku'        => $sku,
+            'content_id' => $content_id,
+            'format'     => $format,
+            'issue'      => '',
+        );
+    }
+
+    $warning_count = 0;
+    $missing_sku_count = 0;
+    $duplicate_count = 0;
+
+    foreach ($results as &$row) {
+        $issues = array();
+
+        if ($format === 'sku' && $row['sku'] === '') {
+            $issues[] = 'SKU missing; will fall back to database ID (' . $row['product_id'] . ')';
+            $missing_sku_count++;
+            $warning_count++;
+        }
+
+        if (!empty($row['content_id']) && ($content_id_counts[$row['content_id']] ?? 0) > 1) {
+            $issues[] = 'Duplicate content ID in scanned products';
+            $duplicate_count++;
+            $warning_count++;
+        }
+
+        $row['issue'] = implode('; ', $issues);
+    }
+    unset($row);
+
+    wp_send_json_success(array(
+        'format'              => $format,
+        'products'            => $results,
+        'warning_count'       => $warning_count,
+        'missing_sku_count'   => $missing_sku_count,
+        'duplicate_count'     => $duplicate_count,
+        'total_checked'       => count($results),
+        'sample_limit'        => $sample_limit,
+        'scan_limited'        => count($results) >= $sample_limit,
+        'catalog_api_checked' => false,
+        'summary'             => 'Local preview only. Match these IDs against your Meta/TikTok catalog feed manually.',
+    ));
 }
 
 // ─── REST API Endpoint: /wp-json/buykori/v1/track ───────────────────────────────
