@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 export default function Checkout() {
   const [cart, setCart] = useState([]);
@@ -16,30 +16,49 @@ export default function Checkout() {
     country: "BD",
   });
   const [loading, setLoading] = useState(false);
+  const checkoutStarted = useRef(false);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
       const storedCart = JSON.parse(localStorage.getItem("cart") || "[]");
       setCart(storedCart);
-
-      const total = storedCart.reduce((sum, item) => sum + item.price * item.qty, 0);
-
-      // Track InitiateCheckout using Buykori AdSync client SDK
-      if (storedCart.length > 0 && window.capi) {
-        window.capi("track", "InitiateCheckout", {
-          value: total,
-          currency: "BDT",
-          content_ids: storedCart.map((item) => String(item.id)),
-          content_type: "product",
-          num_items: storedCart.reduce((sum, item) => sum + item.qty, 0),
-        });
-      }
     }
   }, []);
 
   const total = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
 
+  const trackCheckoutStart = () => {
+    if (checkoutStarted.current || cart.length === 0 || !window.capi) return;
+
+    const cartKey = cart
+      .map((item) => `${item.id}:${item.qty}`)
+      .sort()
+      .join("|");
+    const storageKey = `buykori_checkout_started:${cartKey}`;
+    if (sessionStorage.getItem(storageKey)) {
+      checkoutStarted.current = true;
+      return;
+    }
+
+    const checkoutId = crypto.randomUUID();
+    sessionStorage.setItem(storageKey, checkoutId);
+    checkoutStarted.current = true;
+    window.capi(
+      "track",
+      "InitiateCheckout",
+      {
+        value: total,
+        currency: "BDT",
+        content_ids: cart.map((item) => String(item.id)),
+        content_type: "product",
+        num_items: cart.reduce((sum, item) => sum + item.qty, 0),
+      },
+      { eventId: `checkout:${checkoutId}` }
+    );
+  };
+
   const handleInputChange = (e) => {
+    trackCheckoutStart();
     const { id, value } = e.target;
     setFormData((prev) => ({ ...prev, [id]: value }));
   };
@@ -88,15 +107,19 @@ export default function Checkout() {
           country: formData.country,
         });
 
-        // Fire event (SDK will automatically match it)
-        window.capi("track", "Purchase", {
-          value: total,
-          currency: "BDT",
-          content_ids: cart.map((item) => String(item.id)),
-          content_type: "product",
-          order_id: orderId,
-          num_items: cart.reduce((sum, item) => sum + item.qty, 0),
-        });
+        window.capi(
+          "track",
+          "Purchase",
+          {
+            value: total,
+            currency: "BDT",
+            content_ids: cart.map((item) => String(item.id)),
+            content_type: "product",
+            order_id: orderId,
+            num_items: cart.reduce((sum, item) => sum + item.qty, 0),
+          },
+          { eventId: orderId }
+        );
       }
 
       // Store order info for success page

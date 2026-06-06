@@ -14,18 +14,22 @@ export default function RootLayout({ children }) {
           {`
             (function () {
               var user = {};
-              window.capi = function (command, eventName, data) {
+              var lastPageViewUrl = '';
+              window.capi = function (command, eventName, data, options) {
                 if (command === 'setUser') {
                   user = eventName || {};
                   return;
                 }
                 if (command !== 'track') return;
+                if (eventName === 'PageView' && lastPageViewUrl === window.location.href) return;
+                if (eventName === 'PageView') lastPageViewUrl = window.location.href;
                 fetch('/api/track', {
                   method: 'POST',
                   keepalive: true,
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
                     eventName: eventName,
+                    eventId: options && (options.eventId || options.event_id),
                     customData: data || {},
                     user: user,
                     sourceUrl: window.location.href
