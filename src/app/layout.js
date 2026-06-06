@@ -7,26 +7,35 @@ export const metadata = {
 };
 
 export default function RootLayout({ children }) {
-  const gatewayUrl = process.env.NEXT_PUBLIC_BUYKORI_GATEWAY_URL;
-  const publicTrackerKey = process.env.NEXT_PUBLIC_BUYKORI_PUBLIC_KEY;
-
   return (
     <html lang="en">
       <body>
-        {gatewayUrl && publicTrackerKey ? (
-          <Script id="buykori-adsync-pixel" strategy="afterInteractive">
-            {`
-              !function(f,b,e,v,n,t,s)
-              {if(f.capi)return;n=f.capi=function(){n.callMethod?
-              n.callMethod.apply(n,arguments):n.queue.push(arguments)};
-              if(!f._capi)f._capi=n;n.push=n;n.loaded=!0;n.version='1.0';
-              n.queue=[];t=b.createElement(e);t.async=!0;
-              t.src=v;s=b.getElementsByTagName(e)[0];
-              s.parentNode.insertBefore(t,s)}(window,document,'script',
-              '${gatewayUrl}/t.js?key=${publicTrackerKey}');
-            `}
-          </Script>
-        ) : null}
+        <Script id="buykori-adsync-pixel" strategy="afterInteractive">
+          {`
+            (function () {
+              var user = {};
+              window.capi = function (command, eventName, data) {
+                if (command === 'setUser') {
+                  user = eventName || {};
+                  return;
+                }
+                if (command !== 'track') return;
+                fetch('/api/track', {
+                  method: 'POST',
+                  keepalive: true,
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    eventName: eventName,
+                    customData: data || {},
+                    user: user,
+                    sourceUrl: window.location.href
+                  })
+                }).catch(function () {});
+              };
+              window.capi('track', 'PageView', {});
+            })();
+          `}
+        </Script>
         
         <header>
           <div className="nav-container">
