@@ -34,3 +34,17 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Buykori Tracking Environment
+
+Configure these variables in Vercel before deploying:
+
+```env
+NEXT_PUBLIC_BUYKORI_GATEWAY_URL=https://api.buykori.app
+NEXT_PUBLIC_BUYKORI_PUBLIC_KEY=YOUR_BROWSER_SAFE_PUBLIC_TRACKER_KEY
+BUYKORI_API_KEY=YOUR_PRIVATE_REST_API_KEY
+```
+
+Use the public tracker key shown in the portal Setup Guide for
+`NEXT_PUBLIC_BUYKORI_PUBLIC_KEY`. Never put the REST API access key in a
+`NEXT_PUBLIC_` variable because Next.js exposes those values in the browser.

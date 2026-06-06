@@ -14,6 +14,16 @@ function sha256(text) {
 
 export async function POST(request) {
   try {
+    const gatewayOrigin = process.env.NEXT_PUBLIC_BUYKORI_GATEWAY_URL;
+    const apiKey = process.env.BUYKORI_API_KEY;
+    if (!gatewayOrigin || !apiKey) {
+      console.error("[S2S Tracking Error] Missing gateway URL or private BUYKORI_API_KEY.");
+      return NextResponse.json(
+        { error: "Server-side tracking is not configured" },
+        { status: 503 },
+      );
+    }
+
     const body = await request.json();
     const { orderId, total, items, customer } = body;
 
@@ -29,7 +39,7 @@ export async function POST(request) {
       request.headers.get("x-real-ip") ||
       "127.0.0.1";
 
-    const referer = request.headers.get("referer") || "https://demo-nextjs-shop.vercel.app/checkout";
+    const referer = request.headers.get("referer") || request.nextUrl.origin;
 
     // 2. Hash sensitive customer data (PII) on the server side
     const userData = {
@@ -63,14 +73,26 @@ export async function POST(request) {
       },
     };
     // 4. Send Server-to-Server (S2S) POST request to Buykori AdSync Conversion Gateway
-    const gatewayUrl = `${process.env.NEXT_PUBLIC_BUYKORI_GATEWAY_URL}/c?key=${process.env.NEXT_PUBLIC_BUYKORI_API_KEY}`;
+    const gatewayUrl = `${gatewayOrigin}/api/v1/events`;
+    const requestBody = JSON.stringify({ data: [event] });
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const siteOrigin = new URL(referer).origin;
+    const signature = crypto
+      .createHmac("sha256", apiKey)
+      .update(`${timestamp}.${requestBody}`)
+      .digest("hex");
+
     console.log(`[S2S Tracking] Sending event for Order ${orderId} to Gateway...`);
     const gatewayResponse = await fetch(gatewayUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "X-API-Key": apiKey,
+        "X-CAPI-Origin": siteOrigin,
+        "X-CAPI-Timestamp": timestamp,
+        "X-CAPI-Signature": signature,
       },
-      body: JSON.stringify({ data: [event] }),
+      body: requestBody,
     });
 
     if (!gatewayResponse.ok) {
@@ -81,11 +103,14 @@ export async function POST(request) {
       console.log(`[S2S Tracking Success] Gateway response:`, responseData);
     }
 
-    return NextResponse.json({
-      success: true,
-      message: "Order processed successfully",
-      s2s_tracked: gatewayResponse.ok,
-    });
+    if (!gatewayResponse.ok) {
+      return NextResponse.json(
+        { error: "Order received, but server-side tracking failed", s2s_tracked: false },
+        { status: 502 },
+      );
+    }
+
+    return NextResponse.json({ success: true, message: "Order processed successfully", s2s_tracked: true });
   } catch (error) {
     console.error("[Checkout Route API Error] Failed to process S2S checkout:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });

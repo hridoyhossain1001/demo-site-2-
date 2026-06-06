@@ -7,21 +7,26 @@ export const metadata = {
 };
 
 export default function RootLayout({ children }) {
+  const gatewayUrl = process.env.NEXT_PUBLIC_BUYKORI_GATEWAY_URL;
+  const publicTrackerKey = process.env.NEXT_PUBLIC_BUYKORI_PUBLIC_KEY;
+
   return (
     <html lang="en">
       <body>
-        <Script id="buykori-adsync-pixel" strategy="afterInteractive">
-          {`
-            !function(f,b,e,v,n,t,s)
-            {if(f.capi)return;n=f.capi=function(){n.callMethod?
-            n.callMethod.apply(n,arguments):n.queue.push(arguments)};
-            if(!f._capi)f._capi=n;n.push=n;n.loaded=!0;n.version='1.0';
-            n.queue=[];t=b.createElement(e);t.async=!0;
-            t.src=v;s=b.getElementsByTagName(e)[0];
-            s.parentNode.insertBefore(t,s)}(window,document,'script',
-            '${process.env.NEXT_PUBLIC_BUYKORI_GATEWAY_URL}/t.js?key=${process.env.NEXT_PUBLIC_BUYKORI_API_KEY}');
-          `}
-        </Script>
+        {gatewayUrl && publicTrackerKey ? (
+          <Script id="buykori-adsync-pixel" strategy="afterInteractive">
+            {`
+              !function(f,b,e,v,n,t,s)
+              {if(f.capi)return;n=f.capi=function(){n.callMethod?
+              n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+              if(!f._capi)f._capi=n;n.push=n;n.loaded=!0;n.version='1.0';
+              n.queue=[];t=b.createElement(e);t.async=!0;
+              t.src=v;s=b.getElementsByTagName(e)[0];
+              s.parentNode.insertBefore(t,s)}(window,document,'script',
+              '${gatewayUrl}/t.js?key=${publicTrackerKey}');
+            `}
+          </Script>
+        ) : null}
         
         <header>
           <div className="nav-container">
