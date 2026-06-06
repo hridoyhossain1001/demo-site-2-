@@ -36,6 +36,8 @@ var E="{gateway_origin}/c";
 var U={{}};  // user identity store
 var Q=[];   // event queue (before DOM ready)
 var R=false; // ready flag
+var lastPageViewUrl='';
+var D=qp('buykori_debug')==='1';
 persistMarketing();
 persistTtclid();
 
@@ -103,8 +105,19 @@ function hashArr(arr){{
   return Promise.all(arr.map(function(v){{return sha(v);}}));
 }}
 
+function debug(message,data){{
+  if(D&&typeof console!=='undefined')console.info('[Buykori AdSync] '+message,data||'');
+}}
+
 /* ─── Send Event ───────────────────────────────────────────────── */
-function send(eventName, customData, userData){{
+function send(eventName, customData, userData, eventId){{
+  if(eventName==='PageView'){{
+    if(lastPageViewUrl===location.href){{
+      debug('Suppressed duplicate PageView',location.href);
+      return;
+    }}
+    lastPageViewUrl=location.href;
+  }}
   var fbc=gc('_fbc');
   var fbp=gc('_fbp');
   var ttp=gc('_ttp');
@@ -146,7 +159,7 @@ function send(eventName, customData, userData){{
     var evt={{
       event_name:eventName,
       event_time:Math.floor(Date.now()/1000),
-      event_id:uid(),
+      event_id:eventId||uid(),
       event_source_url:location.href,
       action_source:'website',
       user_data:ud
@@ -166,14 +179,16 @@ function send(eventName, customData, userData){{
     }}
 
     var body=JSON.stringify({{data:[evt]}});
+    debug('Sending '+eventName,{{event_id:evt.event_id,source_url:evt.event_source_url}});
 
     // Prefer sendBeacon (works even on page unload)
     if(navigator.sendBeacon){{
       var blob=new Blob([body],{{type:'application/json'}});
       var ok=navigator.sendBeacon(E+'?key='+K,blob);
-      if(!ok)fallbackFetch(body);
+      if(ok)debug('Queued with sendBeacon',evt.event_id);
+      else fallbackFetch(body,evt);
     }}else{{
-      fallbackFetch(body);
+      fallbackFetch(body,evt);
     }}
   }}).catch(function(err){{
     // Silently fail — never break client's website
@@ -181,13 +196,17 @@ function send(eventName, customData, userData){{
   }});
 }}
 
-function fallbackFetch(body){{
+function fallbackFetch(body,evt){{
   fetch(E+'?key='+K,{{
     method:'POST',
     headers:{{'Content-Type':'application/json'}},
     body:body,
     keepalive:true
-  }}).catch(function(){{}});
+  }}).then(function(response){{
+    debug('Fetch completed',{{event_id:evt&&evt.event_id,status:response.status}});
+  }}).catch(function(error){{
+    debug('Fetch failed',{{event_id:evt&&evt.event_id,error:String(error)}});
+  }});
 }}
 
 /* ─── Global API ───────────────────────────────────────────────── */
@@ -195,9 +214,12 @@ function capi(cmd){{
   if(cmd==='track'){{
     var evtName=arguments[1];
     var cd=arguments[2]||null;
-    var ud=arguments[3]||null;
-    if(!R){{Q.push([evtName,cd,ud]);return;}}
-    send(evtName,cd,ud);
+    var fourth=arguments[3]||null;
+    var opts=fourth&&((fourth.eventId||fourth.event_id||fourth.userData||fourth.user_data))?fourth:null;
+    var ud=opts?(opts.userData||opts.user_data||null):fourth;
+    var eventId=opts?(opts.eventId||opts.event_id||null):null;
+    if(!R){{Q.push([evtName,cd,ud,eventId]);return;}}
+    send(evtName,cd,ud,eventId);
   }}
   else if(cmd==='setUser'){{
     var data=arguments[1]||{{}};
@@ -246,7 +268,7 @@ function init(){{
   // Fire auto PageView
   send('PageView');
   // Flush queued events
-  Q.forEach(function(q){{send(q[0],q[1],q[2]);}});
+  Q.forEach(function(q){{send(q[0],q[1],q[2],q[3]);}});
   Q=[];
 }}
 

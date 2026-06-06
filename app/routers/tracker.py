@@ -188,7 +188,7 @@ async def serve_tracker_js(
         content=js_code,
         media_type="application/javascript; charset=utf-8",
         headers={
-            "Cache-Control": "public, max-age=3600",  # 1 ঘণ্টা ব্রাউজার cache
+            "Cache-Control": "public, max-age=300, stale-while-revalidate=60",
             "X-Content-Type-Options": "nosniff",
             "Access-Control-Allow-Origin": "*",
         },
