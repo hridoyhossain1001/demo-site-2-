@@ -22,11 +22,14 @@ def ensure_remote_dir(sftp: paramiko.SFTPClient, remote_dir: str) -> None:
     current = ""
     for part in remote_dir.strip("/").split("/"):
         current += f"/{part}"
+        created = False
         try:
             sftp.mkdir(current)
+            created = True
         except OSError:
             pass
-        sftp.chmod(current, 0o755)
+        if created:
+            sftp.chmod(current, 0o755)
 
 
 def remove_remote_path(sftp: paramiko.SFTPClient, remote_path: str) -> None:
