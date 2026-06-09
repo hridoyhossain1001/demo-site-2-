@@ -121,6 +121,7 @@ function buykorigw_sanitize_settings( $input ) {
     $content_id_format = sanitize_text_field( $input['content_id_format'] ?? 'id' );
     $sanitized['content_id_format']  = in_array( $content_id_format, array( 'id', 'sku' ), true ) ? $content_id_format : 'id';
     $sanitized['enable_hybrid']      = isset( $input['enable_hybrid'] ) ? 1 : 0;
+    $sanitized['enable_tiktok_pageview'] = isset( $input['enable_tiktok_pageview'] ) ? 1 : 0;
     $sanitized['enable_variations']  = 1;
     $sanitized['fb_pixel_id']        = sanitize_text_field( trim( $input['fb_pixel_id'] ?? '' ) );
     $sanitized['tt_pixel_id']        = sanitize_text_field( trim( $input['tt_pixel_id'] ?? '' ) );
@@ -176,7 +177,7 @@ function buykorigw_test_connection() {
 function buykorigw_check_update_now() {
     check_ajax_referer( 'buykorigw_nonce', 'nonce' );
 
-    if ( ! current_user_can( 'update_plugins' ) ) {
+    if ( ! current_user_can( 'manage_options' ) ) {
         wp_send_json_error( 'Permission denied' );
     }
 
@@ -217,14 +218,36 @@ function buykorigw_pkce_challenge( $verifier ) {
 function buykorigw_portal_url_from_gateway( $gateway_url ) {
     $parts = wp_parse_url( $gateway_url );
     if ( empty( $parts['host'] ) ) {
-        return 'https://client.buykori.app';
+        return 'https://api.buykori.app';
     }
 
     $scheme = ! empty( $parts['scheme'] ) ? $parts['scheme'] : 'https';
-    $host   = $parts['host'];
+    $host   = strtolower( $parts['host'] );
     $port   = ! empty( $parts['port'] ) ? ':' . intval( $parts['port'] ) : '';
 
+    if ( 'client.buykori.app' === $host || 'buykori.app' === $host || 'www.buykori.app' === $host ) {
+        return 'https://api.buykori.app';
+    }
+
     return $scheme . '://' . $host . $port;
+}
+
+function buykorigw_normalize_gateway_url( $gateway_url ) {
+    $gateway_url = rtrim( $gateway_url ?: BUYKORIGW_DEFAULT_GATEWAY_URL, '/' );
+    $parts       = wp_parse_url( $gateway_url );
+
+    if ( empty( $parts['host'] ) ) {
+        return BUYKORIGW_DEFAULT_GATEWAY_URL;
+    }
+
+    $scheme = ! empty( $parts['scheme'] ) ? $parts['scheme'] : 'https';
+    $host   = strtolower( $parts['host'] );
+
+    if ( 'client.buykori.app' === $host || 'buykori.app' === $host || 'www.buykori.app' === $host ) {
+        return BUYKORIGW_DEFAULT_GATEWAY_URL;
+    }
+
+    return $scheme . '://' . $host . ( ! empty( $parts['port'] ) ? ':' . intval( $parts['port'] ) : '' ) . '/api/v1';
 }
 
 function buykorigw_connect_redirect( $type, $message = '' ) {
@@ -244,7 +267,7 @@ function buykorigw_connect_start() {
     }
 
     $settings       = buykorigw_get_settings();
-    $gateway_url    = rtrim( $settings['gateway_url'] ?: BUYKORIGW_DEFAULT_GATEWAY_URL, '/' );
+    $gateway_url    = buykorigw_normalize_gateway_url( $settings['gateway_url'] ?? BUYKORIGW_DEFAULT_GATEWAY_URL );
     $portal_url     = rtrim( buykorigw_portal_url_from_gateway( $gateway_url ), '/' );
     $state          = buykorigw_random_urlsafe( 24 );
     $code_verifier  = buykorigw_random_urlsafe( 48 );
@@ -293,7 +316,7 @@ function buykorigw_connect_callback() {
         buykorigw_connect_redirect( 'error', 'Invalid or expired connection session.' );
     }
 
-    $gateway_url = rtrim( $data['gateway_url'] ?: BUYKORIGW_DEFAULT_GATEWAY_URL, '/' );
+    $gateway_url = buykorigw_normalize_gateway_url( $data['gateway_url'] ?? BUYKORIGW_DEFAULT_GATEWAY_URL );
     $response    = wp_remote_post(
         $gateway_url . '/plugin/connect/exchange',
         array(
@@ -609,6 +632,19 @@ function buykorigw_settings_page() {
                                name="<?php echo BUYKORIGW_OPTION_KEY; ?>[tt_pixel_id]"
                                value="<?php echo esc_attr( $settings['tt_pixel_id'] ?? '' ); ?>"
                                placeholder="যেমন: C1234567890ABC">
+                    </div>
+                    <div class="buykorigw-toggle-card buykorigw-toggle-spaced">
+                        <div class="buykorigw-toggle">
+                            <label class="buykorigw-switch">
+                                <input type="checkbox"
+                                       name="<?php echo BUYKORIGW_OPTION_KEY; ?>[enable_tiktok_pageview]"
+                                       value="1"
+                                       <?php checked( $settings['enable_tiktok_pageview'] ?? 1, 1 ); ?>>
+                                <span class="buykorigw-slider"></span>
+                            </label>
+                            <label>TikTok browser PageView backup</label>
+                        </div>
+                        <p class="description">Sends PageView with TikTok Pixel in the browser only. It does not add server-side TikTok PageView volume.</p>
                     </div>
                     <?php if ( ! empty( $settings['enable_hybrid'] ) && ( ! empty( $settings['fb_pixel_id'] ) || ! empty( $settings['tt_pixel_id'] ) ) ) : ?>
                     <div class="buykorigw-warning-box" style="margin-top:12px;">

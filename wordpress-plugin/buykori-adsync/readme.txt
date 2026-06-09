@@ -4,7 +4,7 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.42
+Stable tag: 1.2.47
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -43,6 +43,30 @@ Buykori AdSync প্লাগইন আপনার WooCommerce স্টোর
 ক্যাশ-অন-ডেলিভারি (COD) অর্ডারের ক্ষেত্রে Purchase ইভেন্ট তখনই Facebook-এ পাঠানো হয় যখন আপনি অর্ডারটি "Completed" করেন। এতে ফেক অর্ডারের ডাটা Facebook-এ যায় না।
 
 == Changelog ==
+
+= 1.2.47 =
+* Fixed the Connect Buykori Account flow so new stores open the backend login/authorization page instead of a blank client route.
+* Normalized old client-domain gateway settings to the canonical Buykori API endpoint during account connection.
+
+= 1.2.46 =
+* Fixed mobile incomplete-checkout recovery capture when customers leave immediately after entering a phone number.
+* Rebuilt the plugin package with the official Linux-safe ZIP builder and refreshed update metadata.
+* Relaxed the manual update-status refresh capability check to match the settings page permission.
+
+= 1.2.45 =
+* Added non-billable TikTok Browser Pixel PageView audit visibility in Client Portal Event History
+* Browser pixel calls are labeled Fired because upstream TikTok acceptance is not directly verifiable
+
+= 1.2.44 =
+* Added a browser-only TikTok PageView backup switch that uses TikTok Pixel without adding server-side TikTok PageView volume.
+* Allows TikTok PageView to run independently from full hybrid browser commerce backup when a TikTok Pixel ID is configured.
+
+= 1.2.43 =
+* Hardened checkout attribution snapshots for classic, Blocks, Store API, and payment redirect flows.
+* Improved AddToCart and InitiateCheckout deduplication with shared event IDs and safer fallback IDs.
+* Made first-party matching cookies and visitor IDs consistent across REST, AJAX, server hooks, and async Purchase.
+* Added safer price parsing for Bengali digits, comma-formatted values, and custom checkout payloads.
+* Reduced retry/replay duplicate risk in the browser queue and server-side Purchase lock path.
 
 = 1.2.42 =
 * Tightened AddToCart detection for page-builder buttons and avoided quantity-control false positives.

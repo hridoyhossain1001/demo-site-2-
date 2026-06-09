@@ -3,7 +3,7 @@
  * Plugin Name:       Buykori AdSync — Server-Side Tracking
  * Plugin URI:        https://buykori.app/
  * Description:       Server-Side Facebook CAPI, TikTok, and GA4 tracking for WooCommerce with one-page landing support, SHA-256 PII hashing, and deferred purchase control.
- * Version:           1.2.42
+ * Version:           1.2.47
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Buykori AdSync
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 // ─── Plugin Constants ──────────────────────────────────────────────────────────
-define('BUYKORIGW_VERSION', '1.2.42');
+define('BUYKORIGW_VERSION', '1.2.47');
 define('BUYKORIGW_OPTIONAL_EVENTS_POLICY_VERSION', '1.2.33');
 
 define('BUYKORIGW_PLUGIN_FILE', __FILE__);
@@ -271,6 +271,7 @@ function buykorigw_get_settings()
         'enable_variations' => 1,
         // Hybrid Tracking Settings
         'enable_hybrid' => 0,
+        'enable_tiktok_pageview' => 1,
         'fb_pixel_id' => '',
         'tt_pixel_id' => '',
         'connected_site_host' => '',
@@ -412,6 +413,140 @@ function buykorigw_recent_initiate_checkout_marker($timestamp, $max_age_seconds 
 }
 
 // ─── Helper: Send Event to Buykori AdSync (Server-Side via wp_remote_post) ─────
+function buykorigw_build_fallback_event_id($event_name, $custom_data = array(), $page_url = '', $external_id = '')
+{
+    $event_name = sanitize_key((string) $event_name);
+    $custom_data = is_array($custom_data) ? $custom_data : array();
+    $content_ids = isset($custom_data['content_ids']) && is_array($custom_data['content_ids'])
+        ? implode('|', array_map('strval', $custom_data['content_ids']))
+        : '';
+    $value = isset($custom_data['value']) ? (string) $custom_data['value'] : '';
+    $identity = $external_id ?: (isset($_COOKIE['_buykorigw_vid']) ? sanitize_text_field(wp_unslash($_COOKIE['_buykorigw_vid'])) : '');
+    $bucket = (string) floor(time() / 30);
+    $fingerprint = md5($event_name . '|' . $content_ids . '|' . $value . '|' . $page_url . '|' . $identity . '|' . $bucket);
+
+    return 'wp_' . $event_name . '_' . substr($fingerprint, 0, 20);
+}
+
+function buykorigw_set_first_party_cookie($name, $value, $days = 90)
+{
+    $name = sanitize_key((string) $name);
+    $value = sanitize_text_field((string) $value);
+    if ($name === '' || $value === '') {
+        return;
+    }
+
+    $options = function_exists('buykorigw_first_party_cookie_options')
+        ? buykorigw_first_party_cookie_options((int) $days)
+        : array(
+            'expires'  => time() + ((int) $days * DAY_IN_SECONDS),
+            'path'     => '/',
+            'secure'   => is_ssl(),
+            'httponly' => false,
+            'samesite' => 'Lax',
+        );
+
+    if (!headers_sent()) {
+        setcookie($name, $value, $options);
+    }
+    $_COOKIE[$name] = $value;
+}
+
+function buykorigw_ensure_first_party_identity(&$fbp, &$fbc, &$ttp, &$ttclid, &$external_id, $fbclid = '')
+{
+    $fbp = sanitize_text_field((string) $fbp);
+    $fbc = sanitize_text_field((string) $fbc);
+    $ttp = sanitize_text_field((string) $ttp);
+    $ttclid = sanitize_text_field((string) $ttclid);
+    $external_id = sanitize_text_field((string) $external_id);
+    $fbclid = sanitize_text_field((string) $fbclid);
+
+    if ($fbp === '' && !empty($_COOKIE['_fbp'])) {
+        $fbp = sanitize_text_field(wp_unslash($_COOKIE['_fbp']));
+    }
+    if ($fbp === '') {
+        $fbp = 'fb.1.' . (string) (time() * 1000) . '.' . wp_rand(1000000000, 9999999999);
+    }
+    buykorigw_set_first_party_cookie('_fbp', $fbp, 90);
+
+    if ($fbc === '' && !empty($_COOKIE['_fbc'])) {
+        $fbc = sanitize_text_field(wp_unslash($_COOKIE['_fbc']));
+    }
+    if ($fbclid !== '') {
+        $current_click = $fbc !== '' ? substr($fbc, strrpos($fbc, '.') + 1) : '';
+        if ($fbc === '' || $current_click !== $fbclid) {
+            $fbc = 'fb.1.' . (string) (time() * 1000) . '.' . $fbclid;
+        }
+    }
+    if ($fbc !== '') {
+        buykorigw_set_first_party_cookie('_fbc', $fbc, 90);
+    }
+
+    if ($ttp === '' && !empty($_COOKIE['_ttp'])) {
+        $ttp = sanitize_text_field(wp_unslash($_COOKIE['_ttp']));
+    }
+    if ($ttp === '') {
+        $ttp = wp_generate_uuid4();
+    }
+    buykorigw_set_first_party_cookie('_ttp', $ttp, 90);
+
+    if ($ttclid === '' && !empty($_COOKIE['_ttclid'])) {
+        $ttclid = sanitize_text_field(wp_unslash($_COOKIE['_ttclid']));
+    }
+    if ($ttclid !== '') {
+        buykorigw_set_first_party_cookie('_ttclid', $ttclid, 90);
+    }
+
+    if ($external_id === '' && !empty($_COOKIE['_buykorigw_vid'])) {
+        $external_id = sanitize_text_field(wp_unslash($_COOKIE['_buykorigw_vid']));
+    }
+    if ($external_id === '') {
+        $external_id = 'bk.' . time() . '.' . wp_generate_uuid4();
+    }
+    buykorigw_set_first_party_cookie('_buykorigw_vid', $external_id, 180);
+}
+
+function buykorigw_parse_amount($value)
+{
+    if (is_int($value) || is_float($value)) {
+        return max(0, (float) $value);
+    }
+
+    $value = strtr((string) $value, array(
+        '০' => '0', '১' => '1', '২' => '2', '৩' => '3', '৪' => '4',
+        '৫' => '5', '৬' => '6', '৭' => '7', '৮' => '8', '৯' => '9',
+        '٠' => '0', '١' => '1', '٢' => '2', '٣' => '3', '٤' => '4',
+        '٥' => '5', '٦' => '6', '٧' => '7', '٨' => '8', '٩' => '9',
+    ));
+    $value = preg_replace('/\s+/', '', $value);
+    $value = preg_replace('/[^0-9,.\-]+/', '', $value);
+    if ($value === '' || $value === '-' ) {
+        return 0.0;
+    }
+
+    $last_comma = strrpos($value, ',');
+    $last_dot = strrpos($value, '.');
+    if ($last_comma !== false && $last_dot !== false) {
+        $decimal = $last_comma > $last_dot ? ',' : '.';
+        $value = preg_replace('/[,.](?=.*[,.])/', '', $value);
+        if ($decimal === ',') {
+            $value = str_replace(',', '.', $value);
+        }
+    } elseif ($last_comma !== false) {
+        $parts = explode(',', $value);
+        $tail = end($parts);
+        $value = (count($parts) > 2 || strlen($tail) === 3)
+            ? implode('', $parts)
+            : implode('.', $parts);
+    } elseif (substr_count($value, '.') > 1) {
+        $parts = explode('.', $value);
+        $tail = array_pop($parts);
+        $value = implode('', $parts) . '.' . $tail;
+    }
+
+    return max(0, (float) $value);
+}
+
 function buykorigw_set_last_event_error($message = '', $code = 0, $body = '')
 {
     $GLOBALS['buykorigw_last_event_error'] = array(
@@ -779,6 +914,19 @@ function buykorigw_atc_intent_marker_timestamp()
         : 0;
 }
 
+function buykorigw_atc_intent_event_id()
+{
+    $event_id = isset($_COOKIE['_buykorigw_atc_event_id'])
+        ? sanitize_text_field(wp_unslash($_COOKIE['_buykorigw_atc_event_id']))
+        : '';
+
+    if ($event_id === '' || strlen($event_id) > 140 || !preg_match('/^[A-Za-z0-9_.:-]+$/', $event_id)) {
+        return '';
+    }
+
+    return $event_id;
+}
+
 function buykorigw_server_add_to_cart($cart_item_key, $product_id, $quantity, $variation_id, $variation, $cart_item_data)
 {
     $settings = buykorigw_get_settings();
@@ -789,9 +937,19 @@ function buykorigw_server_add_to_cart($cart_item_key, $product_id, $quantity, $v
         return;
     }
     $intent_timestamp = buykorigw_atc_intent_marker_timestamp();
-    $consumed_timestamp = (int) WC()->session->get('buykorigw_last_atc_intent', 0);
-    if ($intent_timestamp <= $consumed_timestamp) {
-        return;
+    $intent_event_id = buykorigw_atc_intent_event_id();
+
+    if ($intent_event_id !== '') {
+        $consumed_event_id = (string) WC()->session->get('buykorigw_last_atc_event_id', '');
+        if ($intent_event_id === $consumed_event_id) {
+            return;
+        }
+        WC()->session->set('buykorigw_last_atc_event_id', $intent_event_id);
+    } else {
+        $consumed_timestamp = (int) WC()->session->get('buykorigw_last_atc_intent', 0);
+        if ($intent_timestamp <= $consumed_timestamp) {
+            return;
+        }
     }
     WC()->session->set('buykorigw_last_atc_intent', $intent_timestamp);
 
@@ -803,11 +961,16 @@ function buykorigw_server_add_to_cart($cart_item_key, $product_id, $quantity, $v
 
     $counter = (int) WC()->session->get('buykorigw_atc_counter', 0) + 1;
     WC()->session->set('buykorigw_atc_counter', $counter);
+    $fbp = '';
+    $fbc = '';
+    $ttp = '';
+    $ttclid = '';
     $visitor_id = isset($_COOKIE['_buykorigw_vid']) ? sanitize_text_field(wp_unslash($_COOKIE['_buykorigw_vid'])) : '';
     if ($visitor_id === '') {
         $visitor_id = (string) WC()->session->get_customer_id();
     }
-    $event_id = 'wc_atc_' . md5($visitor_id . '|' . $cart_item_key . '|' . $counter);
+    buykorigw_ensure_first_party_identity($fbp, $fbc, $ttp, $ttclid, $visitor_id);
+    $event_id = $intent_event_id ?: ('wc_atc_' . md5($visitor_id . '|' . $cart_item_key . '|' . $counter));
 
     $content_id = (string) $selected_id;
     if (($settings['content_id_format'] ?? 'id') === 'sku' && $product->get_sku()) {
@@ -837,9 +1000,9 @@ function buykorigw_server_add_to_cart($cart_item_key, $product_id, $quantity, $v
         'client_ip_address' => function_exists('buykorigw_get_real_ip') ? buykorigw_get_real_ip() : ($_SERVER['REMOTE_ADDR'] ?? ''),
         'client_user_agent' => sanitize_text_field($_SERVER['HTTP_USER_AGENT'] ?? ''),
     );
-    foreach (array('fbp' => '_fbp', 'fbc' => '_fbc', 'ttp' => '_ttp', 'ttclid' => '_ttclid') as $key => $cookie_name) {
-        if (!empty($_COOKIE[$cookie_name])) {
-            $user_data[$key] = sanitize_text_field(wp_unslash($_COOKIE[$cookie_name]));
+    foreach (array('fbp' => $fbp, 'fbc' => $fbc, 'ttp' => $ttp, 'ttclid' => $ttclid) as $key => $value) {
+        if ($value !== '') {
+            $user_data[$key] = $value;
         }
     }
     if ($visitor_id !== '') {
@@ -994,9 +1157,16 @@ function buykorigw_normalize_event_custom_data($custom_data, $event_name, $setti
             : array((string) $custom_data['content_id']);
     }
 
+    if (isset($custom_data['value'])) {
+        $custom_data['value'] = buykorigw_parse_amount($custom_data['value']);
+    }
+    if (isset($custom_data['price'])) {
+        $custom_data['price'] = buykorigw_parse_amount($custom_data['price']);
+    }
+
     if (empty($custom_data['contents']) && !empty($custom_data['content_ids']) && is_array($custom_data['content_ids'])) {
         $contents = array();
-        $item_price = isset($custom_data['value']) && count($custom_data['content_ids']) === 1 ? (float) $custom_data['value'] : 0;
+        $item_price = isset($custom_data['value']) && count($custom_data['content_ids']) === 1 ? buykorigw_parse_amount($custom_data['value']) : 0;
         foreach ($custom_data['content_ids'] as $content_id) {
             $content_id = trim((string) $content_id);
             if ($content_id === '' || preg_match('/^[A-Z]{3}$/i', $content_id)) {
@@ -1046,7 +1216,13 @@ function buykorigw_normalize_event_custom_data($custom_data, $event_name, $setti
             $item['content_type'] = $item['content_type'] ?? 'product';
             $item['quantity'] = max(1, (int) ($item['quantity'] ?? 1));
             if (!isset($item['item_price']) && isset($item['price'])) {
-                $item['item_price'] = (float) $item['price'];
+                $item['item_price'] = buykorigw_parse_amount($item['price']);
+            }
+            if (isset($item['item_price'])) {
+                $item['item_price'] = buykorigw_parse_amount($item['item_price']);
+            }
+            if (isset($item['price'])) {
+                $item['price'] = buykorigw_parse_amount($item['price']);
             }
             return $item;
         }, $custom_data['contents'])));
@@ -1062,6 +1238,11 @@ add_action('rest_api_init', function () {
     register_rest_route('buykori/v1', '/track', array(
         'methods'             => 'POST',
         'callback'            => 'buykorigw_rest_track_event',
+        'permission_callback' => '__return_true',
+    ));
+    register_rest_route('buykori/v1', '/browser-audit', array(
+        'methods'             => 'POST',
+        'callback'            => 'buykorigw_rest_browser_pixel_audit',
         'permission_callback' => '__return_true',
     ));
     register_rest_route('buykori/v1', '/atc-receipts', array(
@@ -1089,6 +1270,7 @@ function buykorigw_bypass_rest_cookie_error($errors) {
     if (is_wp_error($errors) && $errors->get_error_code() === 'rest_cookie_invalid_nonce') {
         if (isset($_SERVER['REQUEST_URI']) && (
             strpos($_SERVER['REQUEST_URI'], 'buykori/v1/track') !== false
+            || strpos($_SERVER['REQUEST_URI'], 'buykori/v1/browser-audit') !== false
             || strpos($_SERVER['REQUEST_URI'], 'buykori/v1/atc-receipts') !== false
             || strpos($_SERVER['REQUEST_URI'], 'buykori/v1/incomplete-checkout') !== false
         )) {
@@ -1130,6 +1312,43 @@ function buykorigw_forward_incomplete_checkout($path, $payload, $blocking = true
         && wp_remote_retrieve_response_code($response) < 300;
 }
 
+function buykorigw_rest_browser_pixel_audit(WP_REST_Request $request)
+{
+    if (!buykorigw_rest_same_origin_allowed()) {
+        return new WP_REST_Response(array('success' => false, 'message' => 'Invalid origin'), 403);
+    }
+    if (function_exists('buykorigw_ajax_rate_limited') && buykorigw_ajax_rate_limited('BrowserPageView')) {
+        return new WP_REST_Response(array('success' => false, 'message' => 'Rate limit exceeded'), 429);
+    }
+
+    $params = $request->get_json_params();
+    $event_id = sanitize_text_field((string) ($params['event_id'] ?? ''));
+    if (
+        strtolower((string) ($params['platform'] ?? '')) !== 'tiktok'
+        || (string) ($params['event_name'] ?? '') !== 'PageView'
+        || !preg_match('/^[A-Za-z0-9_.:-]{8,160}$/', $event_id)
+    ) {
+        return new WP_REST_Response(array('success' => false, 'message' => 'Invalid browser audit'), 400);
+    }
+
+    $payload = array(
+        'platform'         => 'TikTok',
+        'event_name'       => 'PageView',
+        'event_id'         => $event_id,
+        'event_source_url' => esc_url_raw((string) ($params['event_source_url'] ?? home_url('/'))),
+        'page_title'       => sanitize_text_field((string) ($params['page_title'] ?? '')),
+        'user_agent'       => sanitize_text_field((string) ($params['user_agent'] ?? '')),
+        'device_type'      => sanitize_text_field((string) ($params['device_type'] ?? '')),
+        'device_os'        => sanitize_text_field((string) ($params['device_os'] ?? '')),
+        'device_browser'   => sanitize_text_field((string) ($params['device_browser'] ?? '')),
+        'screen_width'     => max(0, (int) ($params['screen_width'] ?? 0)),
+        'screen_height'    => max(0, (int) ($params['screen_height'] ?? 0)),
+    );
+    buykorigw_forward_incomplete_checkout('/events/browser-audit', $payload, false);
+
+    return new WP_REST_Response(array('success' => true, 'message' => 'Browser pixel audit queued'), 202);
+}
+
 function buykorigw_rest_capture_incomplete_checkout(WP_REST_Request $request)
 {
     if (!buykorigw_rest_same_origin_allowed()) {
@@ -1154,7 +1373,7 @@ function buykorigw_rest_capture_incomplete_checkout(WP_REST_Request $request)
             'id'       => sanitize_text_field((string) ($item['id'] ?? ($item['content_id'] ?? ''))),
             'name'     => sanitize_text_field((string) ($item['content_name'] ?? ($item['name'] ?? ''))),
             'quantity' => max(1, (int) ($item['quantity'] ?? 1)),
-            'price'    => max(0, (float) ($item['item_price'] ?? ($item['price'] ?? 0))),
+            'price'    => buykorigw_parse_amount($item['item_price'] ?? ($item['price'] ?? 0)),
         );
     }
 
@@ -1165,7 +1384,7 @@ function buykorigw_rest_capture_incomplete_checkout(WP_REST_Request $request)
         'email'         => sanitize_email((string) ($params['email'] ?? '')),
         'address'       => sanitize_textarea_field((string) ($params['address'] ?? '')),
         'products'      => array_slice($products, 0, 30),
-        'amount'        => max(0, (float) ($params['amount'] ?? 0)),
+        'amount'        => buykorigw_parse_amount($params['amount'] ?? 0),
         'currency'      => sanitize_text_field((string) ($params['currency'] ?? 'BDT')),
         'page_url'      => esc_url_raw((string) ($params['page_url'] ?? '')),
         'campaign_data' => (object) (is_array($params['campaign_data'] ?? null) ? array_map('sanitize_text_field', $params['campaign_data']) : array()),
@@ -1295,11 +1514,6 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
         return new WP_REST_Response(array('success' => false, 'message' => 'Missing request origin'), 403);
     }
 
-    // ─── Rate Limit ──────────────────────────────────────────────────────
-    if (function_exists('buykorigw_ajax_rate_limited') && buykorigw_ajax_rate_limited()) {
-        return new WP_REST_Response(array('success' => false, 'message' => 'Rate limit exceeded'), 429);
-    }
-
     // ─── Parse Parameters ────────────────────────────────────────────────
     $params     = $request->get_json_params();
     if (empty($params)) {
@@ -1334,72 +1548,12 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
         return new WP_REST_Response(array('success' => false, 'message' => 'Invalid event name'), 400);
     }
 
+    if (function_exists('buykorigw_ajax_rate_limited') && buykorigw_ajax_rate_limited($event_name)) {
+        return new WP_REST_Response(array('success' => false, 'message' => 'Rate limit exceeded'), 429);
+    }
+
     // ─── First-Party Cookie Management ───────────────────────────────────
-    $normalized_cookie_host = preg_replace('/^www\./', '', strtolower($allowed_host));
-    $can_set_cookie_domain = (
-        strpos($normalized_cookie_host, '.') !== false
-        && !filter_var($normalized_cookie_host, FILTER_VALIDATE_IP)
-        && $normalized_cookie_host !== 'localhost'
-    );
-    $cookie_expiry = time() + (90 * 24 * 60 * 60); // 90 days
-    $cookie_opts   = array(
-        'expires'  => $cookie_expiry,
-        'path'     => '/',
-        'secure'   => is_ssl(),
-        'httponly' => false,
-        'samesite' => 'Lax',
-    );
-    if ($can_set_cookie_domain) {
-        $cookie_opts['domain'] = '.' . $normalized_cookie_host;
-    }
-
-    // _fbp: auto-create if missing
-    if (empty($fbp)) {
-        $fbp = $_COOKIE['_fbp'] ?? '';
-    }
-    if (empty($fbp)) {
-        $fbp = 'fb.1.' . (string) (time() * 1000) . '.' . wp_rand(1000000000, 9999999999);
-    }
-    setcookie('_fbp', $fbp, $cookie_opts);
-    $_COOKIE['_fbp'] = $fbp;
-
-    // _fbc: auto-create from fbclid if present
-    if (empty($fbc)) {
-        $fbc = $_COOKIE['_fbc'] ?? '';
-    }
-    if (empty($fbc) && !empty($params['fbclid'])) {
-        $fbc = 'fb.1.' . (string) (time() * 1000) . '.' . sanitize_text_field($params['fbclid']);
-    }
-    if (!empty($fbc)) {
-        setcookie('_fbc', $fbc, $cookie_opts);
-        $_COOKIE['_fbc'] = $fbc;
-    }
-
-    // _ttp: auto-create if missing
-    if (empty($ttp)) {
-        $ttp = $_COOKIE['_ttp'] ?? '';
-    }
-    if (empty($ttp)) {
-        $ttp = wp_generate_uuid4();
-    }
-    setcookie('_ttp', $ttp, $cookie_opts);
-    $_COOKIE['_ttp'] = $ttp;
-
-    // _ttclid: persist if provided
-    if (!empty($ttclid)) {
-        setcookie('_ttclid', $ttclid, $cookie_opts);
-        $_COOKIE['_ttclid'] = $ttclid;
-    }
-
-    // Stable first-party visitor ID for Meta/TikTok external_id matching
-    if (empty($external_id)) {
-        $external_id = $_COOKIE['_buykorigw_vid'] ?? '';
-    }
-    if (empty($external_id)) {
-        $external_id = 'bk.' . time() . '.' . wp_rand(1000000000, 9999999999);
-    }
-    setcookie('_buykorigw_vid', $external_id, $cookie_opts);
-    $_COOKIE['_buykorigw_vid'] = $external_id;
+    buykorigw_ensure_first_party_identity($fbp, $fbc, $ttp, $ttclid, $external_id, $params['fbclid'] ?? '');
 
     // ─── Parse Custom Data ───────────────────────────────────────────────
     $settings    = buykorigw_get_settings();
@@ -1463,7 +1617,7 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
         'event_source_url' => $page_url,
         'action_source'    => 'website',
         'user_data'        => $user_data,
-        'event_id'         => !empty($event_id) ? $event_id : 'wp_' . $event_name . '_' . time() . '_' . wp_rand(1000, 9999),
+        'event_id'         => !empty($event_id) ? $event_id : buykorigw_build_fallback_event_id($event_name, $custom_data, $page_url, $external_id),
     );
 
     if (!empty($custom_data)) {

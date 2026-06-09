@@ -53,7 +53,7 @@ class PluginDisconnectRequest(BaseModel):
 
 # Plugin version এই ফাইলে hardcoded — PLUGIN_VERSION env var দিয়ে override করা যায়।
 # Update করার সময় এখানে version change করুন এবং WP plugin-এও update করুন।
-PLUGIN_VERSION = "1.2.42"
+PLUGIN_VERSION = "1.2.47"
 PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "wordpress-plugin" / "buykori-adsync"
 PLUGIN_ZIP_PATH = Path(
     os.getenv(
@@ -122,7 +122,7 @@ async def plugin_info(request: Request):
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-06-05",
+        "last_updated": "2026-06-09",
     })
 
 
@@ -168,9 +168,33 @@ def _plugin_update_response(download_url: str, package_sha256: str, signature: s
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-06-05",
+        "last_updated": "2026-06-09",
         "description": "Official Buykori AdSync WordPress plugin for server-side Facebook CAPI, TikTok, and GA4 tracking with one-page landing support and deferred purchase control.",
         "changelog": (
+            "<h4>v1.2.47</h4><ul>"
+            "<li>Fixed the Connect Buykori Account flow so new stores open the backend login and authorization page instead of a blank client route</li>"
+            "<li>Normalizes old client-domain gateway settings to the canonical Buykori API endpoint during account connection</li>"
+            "</ul>"
+            "<h4>v1.2.46</h4><ul>"
+            "<li>Fixed mobile incomplete-checkout recovery capture when customers leave immediately after entering a phone number</li>"
+            "<li>Rebuilt the plugin package with the official Linux-safe ZIP builder and refreshed update metadata</li>"
+            "<li>Relaxed the manual update-status refresh capability check to match the settings page permission</li>"
+            "</ul>"
+            "<h4>v1.2.45</h4><ul>"
+            "<li>Added non-billable TikTok Browser Pixel PageView visibility in Event History</li>"
+            "<li>Labels browser pixel invocation as Fired until TikTok acceptance is verified upstream</li>"
+            "</ul>"
+            "<h4>v1.2.44</h4><ul>"
+            "<li>Added a browser-only TikTok PageView backup switch that uses TikTok Pixel without adding server-side TikTok PageView volume</li>"
+            "<li>Allows TikTok PageView to run independently from full hybrid browser commerce backup when a TikTok Pixel ID is configured</li>"
+            "</ul>"
+            "<h4>v1.2.43</h4><ul>"
+            "<li>Hardened checkout attribution snapshots for classic, Blocks, Store API, and payment redirect flows</li>"
+            "<li>Improved AddToCart and InitiateCheckout deduplication with shared event IDs and safer fallback IDs</li>"
+            "<li>Made first-party matching cookies and visitor IDs consistent across REST, AJAX, server hooks, and async Purchase</li>"
+            "<li>Added safer price parsing for Bengali digits, comma-formatted values, and custom checkout payloads</li>"
+            "<li>Reduced retry and replay duplicate risk in the browser queue and server-side Purchase lock path</li>"
+            "</ul>"
             "<h4>v1.2.42</h4><ul>"
             "<li>Tightened AddToCart detection for page-builder buttons and avoided quantity-control false positives</li>"
             "<li>Improved variation fallback so hidden or global variation inputs are not picked by mistake</li>"
