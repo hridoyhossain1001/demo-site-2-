@@ -105,6 +105,7 @@ async def upsert_incomplete_checkout(
     draft.last_activity_at = now
     if draft.status == "incomplete":
         draft.status = "active"
+
     await db.commit()
     await db.refresh(draft)
     return {"success": True, "id": draft.id, "status": draft.status}

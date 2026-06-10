@@ -70,6 +70,8 @@ class ProfileUpdateRequest(BaseModel):
     name: str
     email: str | None = None
     notificationEmail: str | None = None
+    ownerNotifyWhatsapp: bool | None = None
+    ownerWhatsappNumber: str | None = None
 
 class CredentialsUpdateRequest(BaseModel):
     platform: str
@@ -182,6 +184,22 @@ async def _refresh_incomplete_checkout_states(db: AsyncSession, client_id: int) 
     now = datetime.now(timezone.utc)
     inactive_before = now - timedelta(minutes=20)
     expire_before = now - timedelta(days=30)
+    stale_result = await db.execute(
+        select(IncompleteCheckout).where(
+            IncompleteCheckout.client_id == client_id,
+            IncompleteCheckout.status == "active",
+            IncompleteCheckout.last_activity_at < inactive_before,
+        )
+    )
+    stale_checkouts = stale_result.scalars().all()
+    client = await db.get(Client, client_id) if stale_checkouts else None
+    if client:
+        from app.services.notification_service import create_incomplete_checkout_whatsapp_job
+
+        for checkout in stale_checkouts:
+            checkout.status = "incomplete"
+            await create_incomplete_checkout_whatsapp_job(db, client, checkout)
+
     await db.execute(
         update(IncompleteCheckout)
         .where(
@@ -406,7 +424,9 @@ async def get_profile(
         "ordersQuota": plan["ordersQuota"],
         "renewalDate": renewal_date,
         "eventsUsed": events_used,
-        "eventsQuota": events_quota
+        "eventsQuota": events_quota,
+        "ownerNotifyWhatsapp": client.owner_notify_whatsapp,
+        "ownerWhatsappNumber": client.owner_whatsapp_number or ""
     }
 
 @router.post("/profile")
@@ -436,6 +456,24 @@ async def update_profile(
     if user and payload.notificationEmail is not None:
         user.notification_email = _validate_email(payload.notificationEmail) if payload.notificationEmail.strip() else None
         # notification_email is persisted by the portal state migration.
+
+    if payload.ownerNotifyWhatsapp is not None:
+        client.owner_notify_whatsapp = payload.ownerNotifyWhatsapp
+        if payload.ownerNotifyWhatsapp:
+            from app.models.whatsapp_instance import WhatsAppInstance
+            res = await db.execute(
+                select(WhatsAppInstance).where(WhatsAppInstance.status == "active").order_by(WhatsAppInstance.id)
+            )
+            active_inst = res.scalars().first()
+            if active_inst:
+                client.whatsapp_instance_id = active_inst.id
+            else:
+                logger.warning(f"No active WhatsAppInstance found to link to client {client.id}")
+        else:
+            client.whatsapp_instance_id = None
+
+    if payload.ownerWhatsappNumber is not None:
+        client.owner_whatsapp_number = payload.ownerWhatsappNumber.strip() if payload.ownerWhatsappNumber.strip() else None
 
     await db.commit()
 
@@ -471,7 +509,9 @@ async def update_profile(
         "ordersQuota": plan["ordersQuota"],
         "renewalDate": renewal_date,
         "eventsUsed": events_used,
-        "eventsQuota": events_quota
+        "eventsQuota": events_quota,
+        "ownerNotifyWhatsapp": client.owner_notify_whatsapp,
+        "ownerWhatsappNumber": client.owner_whatsapp_number or ""
     }}
 
 @router.post("/account/password")
@@ -1838,3 +1878,63 @@ async def create_store(
     await db.refresh(new_user)
 
     return {"success": True, "user": _user_payload(new_user, new_client)}
+
+
+# ─── Client Notification Settings ──────────────────────────────────────────────
+
+class NotificationSettingsUpdateRequest(BaseModel):
+    owner_notify_whatsapp: bool
+    owner_whatsapp_number: str | None = None
+    whatsapp_instance_id: int | None = None
+
+
+@router.get("/client/notification-settings")
+async def get_notification_settings(
+    client: Client = Depends(get_current_portal_client),
+):
+    return {
+        "owner_notify_whatsapp": getattr(client, "owner_notify_whatsapp", False),
+        "owner_whatsapp_number": getattr(client, "owner_whatsapp_number", None),
+        "whatsapp_instance_id": getattr(client, "whatsapp_instance_id", None),
+    }
+
+
+@router.patch("/client/notification-settings")
+async def update_notification_settings(
+    payload: NotificationSettingsUpdateRequest,
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.whatsapp_instance import WhatsAppInstance
+
+    client.owner_notify_whatsapp = payload.owner_notify_whatsapp
+
+    phone = payload.owner_whatsapp_number
+    if phone:
+        phone = phone.strip()
+        if not phone:
+            phone = None
+    client.owner_whatsapp_number = phone
+
+    if payload.whatsapp_instance_id is not None:
+        instance = await db.get(WhatsAppInstance, payload.whatsapp_instance_id)
+        if not instance:
+            raise HTTPException(status_code=400, detail="WhatsApp instance not found.")
+        client.whatsapp_instance_id = payload.whatsapp_instance_id
+    else:
+        client.whatsapp_instance_id = None
+
+    await db.commit()
+
+    # Clear client cache
+    from app.dependencies import clear_client_cache
+    clear_client_cache(client.api_key)
+
+    return {
+        "success": True,
+        "settings": {
+            "owner_notify_whatsapp": client.owner_notify_whatsapp,
+            "owner_whatsapp_number": client.owner_whatsapp_number,
+            "whatsapp_instance_id": client.whatsapp_instance_id,
+        }
+    }

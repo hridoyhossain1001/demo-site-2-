@@ -221,6 +221,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Ad spend sync worker disabled (ENABLE_AD_SYNC not set).")
 
+    # 🔄 WhatsApp Owner Notification Worker
+    if os.getenv("ENABLE_NOTIFICATION_WORKER", "").lower() in ("true", "1", "yes"):
+        from app.services.notification_worker import run_notification_worker_forever
+        _launch(run_notification_worker_forever(), name="notification-worker")
+        logger.info("WhatsApp owner notification worker started.")
+    else:
+        logger.info("WhatsApp owner notification worker disabled (ENABLE_NOTIFICATION_WORKER not set).")
+
     # 🌍 GeoIP Database Load
     from app.services.geoip_service import download_geoip_db_if_missing, close_geoip_db
     await download_geoip_db_if_missing()

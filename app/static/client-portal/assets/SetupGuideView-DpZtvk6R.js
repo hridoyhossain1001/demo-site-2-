@@ -1,4 +1,4 @@
-﻿import{ax as E,U,at as e,G as j,a2 as y,m as w,p as B,C as c,n as l,c as L}from"./vendor-bundle-Znbnv-r4.js";/**
+import{ax as E,U,at as e,G as j,a2 as y,m as w,p as B,C as c,n as l,c as L}from"./vendor-bundle-Znbnv-r4.js";/**
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */const $=[{q:"How does Buykori keep tracking when ad blockers are active?",a:"Buykori sends important store events from your WordPress server instead of relying only on browser scripts. This helps Meta, TikTok, and Google receive purchase data even when a visitor uses an ad blocker."},{q:"Why are my events showing as 'Retrying' or 'Failed'?",a:"This usually means a platform key, pixel ID, or account setting needs attention. Open the event details, check the platform response, then update the matching settings if needed."},{q:"How does Buykori prevent double-counted events?",a:"Buykori sends the same event name and event ID through both browser and server tracking. Ad platforms use that match to count one real customer action instead of two."},{q:"What does match quality mean?",a:"Match quality shows how well an ad platform can connect an event to the right customer. Email, phone, browser, and location signals can improve reporting and ad optimization."}];function W({faqExpanded:k,setFaqExpanded:N,copiedStates:n,handleCopy:r,setActivePage:_,api_key:S,public_key:C,pluginReleaseInfo:i}){const[o,d]=E.useState("wordpress");U.useEffect(()=>{const a=t=>{const s=t.detail;if(s?.pageId!=="setup-guide")return;const T=s.sectionId==="setup-shopify"?"shopify":s.sectionId==="setup-custom"?"custom":"wordpress";d(T),window.requestAnimationFrame(()=>{document.getElementById(s.sectionId)?.scrollIntoView({behavior:"smooth",block:"start"})})};return window.addEventListener("buykori:page-section",a),()=>window.removeEventListener("buykori:page-section",a)},[]);const m=S?.trim()||"",u=C?.trim()||"",x=u.length>0,p=(()=>{const{protocol:a,hostname:t,origin:s}=window.location;return t==="client.buykori.app"||t==="buykori.app"||t==="www.buykori.app"?"https://api.buykori.app":t.startsWith("client.")?`${a}//${t.replace(/^client\./,"api.")}`:s})(),h=`${p}/api/v1`,P=`${p}/c`,I=`${h}/plugin/download`,A=i?.package_size?Math.round(i.package_size/1024):0,b=`// Buykori AdSync Custom Pixel Tracking Code
@@ -40,7 +40,7 @@ analytics.subscribe("product_added_to_cart", (event) => {
   const eventId = generateEventId();
   const cartLine = event.data?.cartLine;
   const merchandise = cartLine?.merchandise;
-
+  
   fetch(API_URL + "?key=" + API_KEY, {
     method: "POST",
     keepalive: true,
@@ -71,7 +71,7 @@ analytics.subscribe("product_added_to_cart", (event) => {
 analytics.subscribe("checkout_started", (event) => {
   const eventId = generateEventId();
   const checkout = event.data?.checkout;
-
+  
   fetch(API_URL + "?key=" + API_KEY, {
     method: "POST",
     keepalive: true,

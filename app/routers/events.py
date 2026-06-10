@@ -684,6 +684,18 @@ async def receive_events(
                 )
             queued_count = len(queue_events)
 
+        # Enqueue WhatsApp owner notification jobs for new Purchase events
+        has_purchase = any(e.event_name == "Purchase" for e in payload.data)
+        if has_purchase:
+            from app.models.client import Client as ClientModel
+            from app.services.notification_service import create_purchase_whatsapp_job
+            client_model = await db.get(ClientModel, client.id)
+            if client_model:
+                for event in payload.data:
+                    if event.event_name == "Purchase":
+                        event_dict = event.model_dump(exclude_none=True)
+                        await create_purchase_whatsapp_job(db, client_model, event_dict)
+
         await db.commit()
     except HTTPException:
         await db.rollback()

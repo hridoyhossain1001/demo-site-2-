@@ -1,5 +1,5 @@
 import secrets
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON, ForeignKey
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -68,5 +68,11 @@ class Client(Base):
     billing_status = Column(String, default="paid", nullable=False) # trial / paid / pending_payment / overdue / manual_invoice / free
     trial_started_at = Column(DateTime(timezone=True), nullable=True)
     trial_ends_at = Column(DateTime(timezone=True), nullable=True)
+
+    # ─── WhatsApp Notifications Settings ──────────────────────────────────
+    owner_notify_whatsapp = Column(Boolean, default=False, nullable=False)
+    owner_whatsapp_number = Column(String(50), nullable=True)
+    whatsapp_instance_id = Column(Integer, ForeignKey("whatsapp_instances.id", ondelete="SET NULL"), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

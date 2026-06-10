@@ -1,4 +1,4 @@
-﻿import os
+import os
 import secrets
 import logging
 import hmac
@@ -1482,3 +1482,240 @@ async def admin_api_events(
         "events": events_list,
         "totalCount": total_count
     }
+
+
+# ─── Admin WhatsApp Notifications Management ───────────────────────────────────
+
+class WhatsAppInstanceCreate(BaseModel):
+    instance_name: str
+    phone_number: str | None = None
+    provider: str = "evolution"
+    base_url: str | None = None
+    status: str = "active"
+    client_count: int = 0
+
+
+class WhatsAppInstanceUpdate(BaseModel):
+    instance_name: str | None = None
+    phone_number: str | None = None
+    provider: str | None = None
+    base_url: str | None = None
+    status: str | None = None
+    client_count: int | None = None
+
+
+@router.get("/admin/notification-jobs")
+async def list_notification_jobs(
+    limit: int = Query(default=100, ge=1, le=250),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = None,
+    client_id: int | None = None,
+    _: str = Depends(verify_admin_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.notification_job import NotificationJob
+
+    stmt = select(NotificationJob)
+    if status:
+        stmt = stmt.where(NotificationJob.status == status)
+    if client_id:
+        stmt = stmt.where(NotificationJob.client_id == client_id)
+
+    # Get total count
+    count_stmt = select(func.count(NotificationJob.id))
+    if status:
+        count_stmt = count_stmt.where(NotificationJob.status == status)
+    if client_id:
+        count_stmt = count_stmt.where(NotificationJob.client_id == client_id)
+    total = await db.scalar(count_stmt) or 0
+
+    stmt = stmt.order_by(desc(NotificationJob.created_at)).offset(offset).limit(limit)
+    result = await db.execute(stmt)
+    jobs = result.scalars().all()
+
+    sensitive_keys = {"phone", "customer_phone", "owner_whatsapp_number", "email", "address", "customer_name"}
+
+    def _mask_notification_value(key: str, value):
+        if value is None:
+            return None
+        lowered = key.lower()
+        if "phone" in lowered:
+            digits = "".join(ch for ch in str(value) if ch.isdigit())
+            return f"***{digits[-4:]}" if digits else "***"
+        if lowered in sensitive_keys or "email" in lowered or "address" in lowered:
+            return "***"
+        return value
+
+    def _safe_notification_payload(value):
+        if isinstance(value, dict):
+            return {
+                key: _safe_notification_payload(_mask_notification_value(key, nested_value))
+                for key, nested_value in value.items()
+            }
+        if isinstance(value, list):
+            return [_safe_notification_payload(item) for item in value[:10]]
+        return value
+
+    def _message_preview(message: str | None) -> str | None:
+        if not message:
+            return None
+        lines = []
+        for line in message.splitlines():
+            lowered = line.lower()
+            if "ফোন" in line or "phone" in lowered or "email" in lowered or "address" in lowered:
+                label = line.split(":", 1)[0] if ":" in line else "Sensitive"
+                lines.append(f"{label}: ***")
+            else:
+                lines.append(line)
+        preview = "\n".join(lines)
+        return preview[:500]
+
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": j.id,
+                "client_id": j.client_id,
+                "whatsapp_instance_id": j.whatsapp_instance_id,
+                "event_type": j.event_type,
+                "channel": j.channel,
+                "provider": j.provider,
+                "payload": _safe_notification_payload(j.payload),
+                "message_preview": _message_preview(j.message_text),
+                "status": j.status,
+                "attempt_count": j.attempt_count,
+                "max_attempts": j.max_attempts,
+                "next_attempt_at": j.next_attempt_at.isoformat() if j.next_attempt_at else None,
+                "locked_by": j.locked_by,
+                "locked_until": j.locked_until.isoformat() if j.locked_until else None,
+                "dedupe_key": j.dedupe_key,
+                "sent_at": j.sent_at.isoformat() if j.sent_at else None,
+                "error_message": j.error_message,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "updated_at": j.updated_at.isoformat() if j.updated_at else None,
+            }
+            for j in jobs
+        ]
+    }
+
+
+@router.get("/admin/whatsapp-instances")
+async def list_whatsapp_instances(
+    _: str = Depends(verify_admin_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.whatsapp_instance import WhatsAppInstance
+
+    stmt = select(WhatsAppInstance).order_by(WhatsAppInstance.created_at.desc())
+    result = await db.execute(stmt)
+    instances = result.scalars().all()
+    return [
+        {
+            "id": inst.id,
+            "instance_name": inst.instance_name,
+            "phone_number": inst.phone_number,
+            "provider": inst.provider,
+            "base_url": inst.base_url,
+            "status": inst.status,
+            "client_count": inst.client_count,
+            "last_health_check_at": inst.last_health_check_at.isoformat() if inst.last_health_check_at else None,
+            "last_sent_at": inst.last_sent_at.isoformat() if inst.last_sent_at else None,
+            "created_at": inst.created_at.isoformat() if inst.created_at else None,
+            "updated_at": inst.updated_at.isoformat() if inst.updated_at else None,
+        }
+        for inst in instances
+    ]
+
+
+@router.post("/admin/whatsapp-instances")
+async def create_whatsapp_instance(
+    payload: WhatsAppInstanceCreate,
+    _: str = Depends(verify_admin_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.whatsapp_instance import WhatsAppInstance
+
+    # Check uniqueness of instance_name
+    existing = await db.execute(
+        select(WhatsAppInstance).where(WhatsAppInstance.instance_name == payload.instance_name)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="WhatsApp instance name already exists.")
+
+    inst = WhatsAppInstance(
+        instance_name=payload.instance_name,
+        phone_number=payload.phone_number,
+        provider=payload.provider,
+        base_url=payload.base_url,
+        status=payload.status,
+        client_count=payload.client_count,
+    )
+    db.add(inst)
+    await db.commit()
+    await db.refresh(inst)
+    return {
+        "success": True,
+        "instance": {
+            "id": inst.id,
+            "instance_name": inst.instance_name,
+            "phone_number": inst.phone_number,
+            "provider": inst.provider,
+            "base_url": inst.base_url,
+            "status": inst.status,
+            "client_count": inst.client_count,
+            "created_at": inst.created_at.isoformat() if inst.created_at else None,
+            "updated_at": inst.updated_at.isoformat() if inst.updated_at else None,
+        }
+    }
+
+
+@router.patch("/admin/whatsapp-instances/{id}")
+async def update_whatsapp_instance(
+    id: int,
+    payload: WhatsAppInstanceUpdate,
+    _: str = Depends(verify_admin_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.whatsapp_instance import WhatsAppInstance
+
+    inst = await db.get(WhatsAppInstance, id)
+    if not inst:
+        raise HTTPException(status_code=404, detail="WhatsApp instance not found.")
+
+    if payload.instance_name is not None:
+        # Check uniqueness if changed
+        if payload.instance_name != inst.instance_name:
+            existing = await db.execute(
+                select(WhatsAppInstance).where(WhatsAppInstance.instance_name == payload.instance_name)
+            )
+            if existing.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="WhatsApp instance name already exists.")
+        inst.instance_name = payload.instance_name
+
+    if payload.phone_number is not None:
+        inst.phone_number = payload.phone_number
+    if payload.provider is not None:
+        inst.provider = payload.provider
+    if payload.base_url is not None:
+        inst.base_url = payload.base_url
+    if payload.status is not None:
+        inst.status = payload.status
+    if payload.client_count is not None:
+        inst.client_count = payload.client_count
+
+    await db.commit()
+    return {
+        "success": True,
+        "instance": {
+            "id": inst.id,
+            "instance_name": inst.instance_name,
+            "phone_number": inst.phone_number,
+            "provider": inst.provider,
+            "base_url": inst.base_url,
+            "status": inst.status,
+            "client_count": inst.client_count,
+            "created_at": inst.created_at.isoformat() if inst.created_at else None,
+            "updated_at": inst.updated_at.isoformat() if inst.updated_at else None,
+        }
+    }
+

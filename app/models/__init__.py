@@ -1,4 +1,4 @@
-﻿# package init â€” à¦¸à¦¬ à¦®à¦¡à§‡à¦² à¦‡à¦®à§à¦ªà§‹à¦°à§à¦Ÿ à¦•à¦°à§‹ à¦¯à§‡à¦¨ create_all() à¦•à¦¾à¦œ à¦•à¦°à§‡
+# package init â€” à¦¸à¦¬ à¦®à¦¡à§‡à¦² à¦‡à¦®à§à¦ªà§‹à¦°à§à¦Ÿ à¦•à¦°à§‹ à¦¯à§‡à¦¨ create_all() à¦•à¦¾à¦œ à¦•à¦°à§‡
 from app.models.client import Client  # noqa: F401
 from app.models.event_dedup import EventDedup  # noqa: F401
 from app.models.event_log import EventLog  # noqa: F401
@@ -19,3 +19,6 @@ from app.models.site_binding import SiteBinding  # noqa: F401
 from app.models.ad_account import AdAccount  # noqa: F401
 from app.models.ad_campaign import AdCampaign  # noqa: F401
 from app.models.ad_insight_daily import AdInsightDaily  # noqa: F401
+from app.models.whatsapp_instance import WhatsAppInstance  # noqa: F401
+from app.models.notification_job import NotificationJob  # noqa: F401
+
