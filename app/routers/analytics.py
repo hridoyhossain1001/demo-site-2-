@@ -1,14 +1,14 @@
-"""
+﻿"""
 Advanced Analytics Router
-──────────────────────────
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 EMQ Score, Conversion Funnel, Event Breakdown, Hourly Heatmap, Top Products
-Client Portal-এর জন্য analytics data API।
+Client Portal-à¦à¦° à¦œà¦¨à§à¦¯ analytics data APIà¥¤
 
 Endpoints:
-  GET /api/v1/analytics/overview     — Overall stats (EMQ, funnel, breakdown)
-  GET /api/v1/analytics/hourly       — Hourly heatmap data
-  GET /api/v1/analytics/top-products — Top products by events
-  GET /api/v1/analytics/export       — CSV export
+  GET /api/v1/analytics/overview     â€” Overall stats (EMQ, funnel, breakdown)
+  GET /api/v1/analytics/hourly       â€” Hourly heatmap data
+  GET /api/v1/analytics/top-products â€” Top products by events
+  GET /api/v1/analytics/export       â€” CSV export
 """
 
 import csv
@@ -17,21 +17,25 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, and_, func as sql_func, extract, case
+from sqlalchemy import select, and_, func as sql_func, extract, case, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_client, CachedClient
 from app.models.event_log import EventLog
+from app.models.ad_account import AdAccount
+from app.models.ad_campaign import AdCampaign
+from app.models.ad_insight_daily import AdInsightDaily
+from app.models.pending_event import PendingEvent
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ─── Response Schemas ────────────────────────────────────────────────────────
+# â”€â”€â”€ Response Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class EventBreakdown(BaseModel):
     event_name: str
@@ -141,11 +145,39 @@ class SignalDoctorResponse(BaseModel):
     issues: list[SignalIssue]
 
 
-# ─── EMQ Score Calculator ────────────────────────────────────────────────────
+class AdPerformanceRow(BaseModel):
+    campaign_id: str
+    campaign_name: str
+    platform: str
+    spend: float
+    clicks: int
+    impressions: int
+    ctr: float
+    cpc: float
+    placed_purchases: int
+    placed_revenue: float
+    placed_roas: float
+    placed_cpa: float
+    confirmed_purchases: int
+    confirmed_revenue: float
+    confirmed_roas: float
+    confirmed_cpa: float
+    browser_page_views: int
+    server_page_views: int
+    tracking_bypass_rate: float
+
+
+class AdPerformanceResponse(BaseModel):
+    status: str
+    period_days: int
+    data: list[AdPerformanceRow]
+
+
+# â”€â”€â”€ EMQ Score Calculator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _calculate_emq_estimate(events_data: list[dict]) -> float:
     """
-    Facebook Event Match Quality (EMQ) স্কোর estimate করে।
+    Facebook Event Match Quality (EMQ) à¦¸à§à¦•à§‹à¦° estimate à¦•à¦°à§‡à¥¤
     EMQ depends on: email, phone, IP, UA, fbp, fbc, external_id, country, city
     Score: 0-10 (higher = better match quality)
     """
@@ -191,19 +223,19 @@ def _grade(score: int) -> str:
     return "Critical"
 
 
-# ─── GET /analytics/overview ─────────────────────────────────────────────────
+# â”€â”€â”€ GET /analytics/overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/analytics/overview",
     response_model=OverviewResponse,
-    summary="Analytics overview — EMQ, funnel, breakdown",
+    summary="Analytics overview â€” EMQ, funnel, breakdown",
 )
 async def analytics_overview(
     client: CachedClient = Depends(get_current_client),
     db: AsyncSession = Depends(get_db),
-    days: int = Query(7, ge=1, le=90, description="কত দিনের ডেটা"),
+    days: int = Query(7, ge=1, le=90, description="à¦•à¦¤ à¦¦à¦¿à¦¨à§‡à¦° à¦¡à§‡à¦Ÿà¦¾"),
 ):
-    """EMQ Score, Event Breakdown, Conversion Funnel সহ analytics overview"""
+    """EMQ Score, Event Breakdown, Conversion Funnel à¦¸à¦¹ analytics overview"""
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
 
@@ -244,7 +276,7 @@ async def analytics_overview(
         pct = round((count / success * 100) if success > 0 else 0, 1)
         breakdown.append(EventBreakdown(event_name=name, count=count, percentage=pct))
 
-    # Conversion Funnel — single query instead of N+1 per event type
+    # Conversion Funnel â€” single query instead of N+1 per event type
     funnel_events = ["PageView", "ViewContent", "AddToCart", "InitiateCheckout", "Purchase"]
     funnel_r = await db.execute(
         select(EventLog.event_name, sql_func.coalesce(sql_func.sum(EventLog.event_count), 0))
@@ -271,7 +303,7 @@ async def analytics_overview(
         funnel.append(FunnelStep(step=fe, count=count, drop_off=drop))
         prev_count = count if count > 0 else prev_count
 
-    # EMQ Score — average stored estimate from recent events
+    # EMQ Score â€” average stored estimate from recent events
     sample_r = await db.execute(
         select(sql_func.avg(EventLog.emq_score))
         .where(and_(
@@ -298,7 +330,7 @@ async def analytics_overview(
     )
 
 
-# ─── GET /analytics/hourly — Hourly Heatmap ─────────────────────────────────
+# â”€â”€â”€ GET /analytics/hourly â€” Hourly Heatmap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/analytics/hourly",
@@ -310,7 +342,7 @@ async def analytics_hourly(
     db: AsyncSession = Depends(get_db),
     days: int = Query(7, ge=1, le=30),
 ):
-    """কোন সময়ে সবচেয়ে বেশি event fire হয়"""
+    """à¦•à§‹à¦¨ à¦¸à¦®à¦¯à¦¼à§‡ à¦¸à¦¬à¦šà§‡à¦¯à¦¼à§‡ à¦¬à§‡à¦¶à¦¿ event fire à¦¹à¦¯à¦¼"""
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
     hourly_r = await db.execute(
@@ -333,7 +365,7 @@ async def analytics_hourly(
     return HourlyResponse(status="success", data=data)
 
 
-# ─── GET /analytics/top-products ─────────────────────────────────────────────
+# â”€â”€â”€ GET /analytics/top-products â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/analytics/top-products",
@@ -346,7 +378,7 @@ async def analytics_top_products(
     days: int = Query(7, ge=1, le=30),
     limit: int = Query(10, ge=1, le=50),
 ):
-    """কোন product সবচেয়ে বেশি AddToCart / Purchase হচ্ছে"""
+    """à¦•à§‹à¦¨ product à¦¸à¦¬à¦šà§‡à¦¯à¦¼à§‡ à¦¬à§‡à¦¶à¦¿ AddToCart / Purchase à¦¹à¦šà§à¦›à§‡"""
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
     # Extract product ID from event_id (WP snippet uses 'view-123', 'cart-123')
@@ -577,7 +609,7 @@ async def analytics_audience(
 @router.get(
     "/analytics/signal-doctor",
     response_model=SignalDoctorResponse,
-    summary="Signal Health Doctor — event quality diagnostics",
+    summary="Signal Health Doctor â€” event quality diagnostics",
 )
 async def signal_doctor(
     client: CachedClient = Depends(get_current_client),
@@ -640,8 +672,8 @@ async def signal_doctor(
                     severity="critical",
                     title="No events received",
                     metric="0 events",
-                    impact="Facebook/TikTok/GA4 কোনো platform-ই optimize করার মতো signal পাচ্ছে না।",
-                    fix="WordPress plugin/API key/domain setup চেক করে একটি PageView এবং Purchase test event পাঠান।",
+                    impact="Facebook/TikTok/GA4 à¦•à§‹à¦¨à§‹ platform-à¦‡ optimize à¦•à¦°à¦¾à¦° à¦®à¦¤à§‹ signal à¦ªà¦¾à¦šà§à¦›à§‡ à¦¨à¦¾à¥¤",
+                    fix="WordPress plugin/API key/domain setup à¦šà§‡à¦• à¦•à¦°à§‡ à¦à¦•à¦Ÿà¦¿ PageView à¦à¦¬à¦‚ Purchase test event à¦ªà¦¾à¦ à¦¾à¦¨à¥¤",
                 )
             ],
         )
@@ -655,8 +687,8 @@ async def signal_doctor(
             severity="high",
             title="Event ID coverage low",
             metric=f"{signal_rates['event_id']}%",
-            impact="Browser/server deduplication দুর্বল হতে পারে, একই conversion double count হওয়ার ঝুঁকি থাকে।",
-            fix="Official plugin বা tracker ব্যবহার করুন; server এখন missing event_id auto-generate করবে।",
+            impact="Browser/server deduplication à¦¦à§à¦°à§à¦¬à¦² à¦¹à¦¤à§‡ à¦ªà¦¾à¦°à§‡, à¦à¦•à¦‡ conversion double count à¦¹à¦“à§Ÿà¦¾à¦° à¦à§à¦à¦•à¦¿ à¦¥à¦¾à¦•à§‡à¥¤",
+            fix="Official plugin à¦¬à¦¾ tracker à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦° à¦•à¦°à§à¦¨; server à¦à¦–à¦¨ missing event_id auto-generate à¦•à¦°à¦¬à§‡à¥¤",
         ))
 
     if commerce_logs and signal_rates["content_ids"] < 95:
@@ -665,8 +697,8 @@ async def signal_doctor(
             severity="high",
             title="Content ID missing in commerce events",
             metric=f"{signal_rates['content_ids']}%",
-            impact="TikTok/Facebook catalog product matching দুর্বল হবে, shop ads optimization কমে যাবে।",
-            fix="Product ID/SKU থেকে content_ids পাঠান। Booster content_ids থেকে contents auto-build করবে, কিন্তু source payload-এ product ID থাকা জরুরি।",
+            impact="TikTok/Facebook catalog product matching à¦¦à§à¦°à§à¦¬à¦² à¦¹à¦¬à§‡, shop ads optimization à¦•à¦®à§‡ à¦¯à¦¾à¦¬à§‡à¥¤",
+            fix="Product ID/SKU à¦¥à§‡à¦•à§‡ content_ids à¦ªà¦¾à¦ à¦¾à¦¨à¥¤ Booster content_ids à¦¥à§‡à¦•à§‡ contents auto-build à¦•à¦°à¦¬à§‡, à¦•à¦¿à¦¨à§à¦¤à§ source payload-à¦ product ID à¦¥à¦¾à¦•à¦¾ à¦œà¦°à§à¦°à¦¿à¥¤",
         ))
 
     if purchase_logs and (signal_rates["value"] < 95 or signal_rates["currency"] < 95):
@@ -675,8 +707,8 @@ async def signal_doctor(
             severity="high",
             title="Purchase value/currency incomplete",
             metric=f"value {signal_rates['value']}%, currency {signal_rates['currency']}%",
-            impact="ROAS, revenue এবং value optimization ভুল দেখাতে পারে।",
-            fix="Purchase custom_data-তে value এবং ISO currency দিন। Value থাকলে server default currency auto-fill করবে।",
+            impact="ROAS, revenue à¦à¦¬à¦‚ value optimization à¦­à§à¦² à¦¦à§‡à¦–à¦¾à¦¤à§‡ à¦ªà¦¾à¦°à§‡à¥¤",
+            fix="Purchase custom_data-à¦¤à§‡ value à¦à¦¬à¦‚ ISO currency à¦¦à¦¿à¦¨à¥¤ Value à¦¥à¦¾à¦•à¦²à§‡ server default currency auto-fill à¦•à¦°à¦¬à§‡à¥¤",
         ))
 
     if signal_rates["user_match"] < 80:
@@ -685,8 +717,8 @@ async def signal_doctor(
             severity="medium",
             title="User match signal weak",
             metric=f"{signal_rates['user_match']}%",
-            impact="EMQ/Event Match Quality কমে যেতে পারে, conversion attribution কম match হবে।",
-            fix="Email/phone capture enable রাখুন এবং browser cookies (_fbp/_fbc/_ttp/ttclid) pass হচ্ছে কি না দেখুন।",
+            impact="EMQ/Event Match Quality à¦•à¦®à§‡ à¦¯à§‡à¦¤à§‡ à¦ªà¦¾à¦°à§‡, conversion attribution à¦•à¦® match à¦¹à¦¬à§‡à¥¤",
+            fix="Email/phone capture enable à¦°à¦¾à¦–à§à¦¨ à¦à¦¬à¦‚ browser cookies (_fbp/_fbc/_ttp/ttclid) pass à¦¹à¦šà§à¦›à§‡ à¦•à¦¿ à¦¨à¦¾ à¦¦à§‡à¦–à§à¦¨à¥¤",
         ))
 
     if signal_rates["email_or_phone"] < 30:
@@ -695,8 +727,8 @@ async def signal_doctor(
             severity="medium",
             title="Email/phone signal low",
             metric=f"{signal_rates['email_or_phone']}%",
-            impact="Purchase/Lead match quality কম হতে পারে, বিশেষ করে COD/ecommerce orders-এ।",
-            fix="Checkout/order data থেকে email এবং phone পাঠান। Server raw value পেলে SHA-256 hash করে দেবে।",
+            impact="Purchase/Lead match quality à¦•à¦® à¦¹à¦¤à§‡ à¦ªà¦¾à¦°à§‡, à¦¬à¦¿à¦¶à§‡à¦· à¦•à¦°à§‡ COD/ecommerce orders-à¦à¥¤",
+            fix="Checkout/order data à¦¥à§‡à¦•à§‡ email à¦à¦¬à¦‚ phone à¦ªà¦¾à¦ à¦¾à¦¨à¥¤ Server raw value à¦ªà§‡à¦²à§‡ SHA-256 hash à¦•à¦°à§‡ à¦¦à§‡à¦¬à§‡à¥¤",
         ))
 
     if signal_rates["utm"] < 50:
@@ -705,8 +737,8 @@ async def signal_doctor(
             severity="low",
             title="Campaign attribution missing",
             metric=f"{signal_rates['utm']}%",
-            impact="Facebook vs TikTok campaign comparison পরিষ্কার হবে না।",
-            fix="Campaign URL Builder দিয়ে ad destination URL বানিয়ে প্রতিটি campaign-এ ব্যবহার করুন।",
+            impact="Facebook vs TikTok campaign comparison à¦ªà¦°à¦¿à¦·à§à¦•à¦¾à¦° à¦¹à¦¬à§‡ à¦¨à¦¾à¥¤",
+            fix="Campaign URL Builder à¦¦à¦¿à§Ÿà§‡ ad destination URL à¦¬à¦¾à¦¨à¦¿à§Ÿà§‡ à¦ªà§à¦°à¦¤à¦¿à¦Ÿà¦¿ campaign-à¦ à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦° à¦•à¦°à§à¦¨à¥¤",
         ))
 
     for required_event in ["ViewContent", "AddToCart", "InitiateCheckout", "Purchase"]:
@@ -716,8 +748,8 @@ async def signal_doctor(
                 severity="medium",
                 title=f"{required_event} event not seen",
                 metric="0 events",
-                impact="Full funnel optimization ও diagnostics অসম্পূর্ণ থাকবে।",
-                fix=f"Plugin settings-এ {required_event} enabled আছে কি না এবং site flow থেকে event fire হচ্ছে কি না test করুন।",
+                impact="Full funnel optimization à¦“ diagnostics à¦…à¦¸à¦®à§à¦ªà§‚à¦°à§à¦£ à¦¥à¦¾à¦•à¦¬à§‡à¥¤",
+                fix=f"Plugin settings-à¦ {required_event} enabled à¦†à¦›à§‡ à¦•à¦¿ à¦¨à¦¾ à¦à¦¬à¦‚ site flow à¦¥à§‡à¦•à§‡ event fire à¦¹à¦šà§à¦›à§‡ à¦•à¦¿ à¦¨à¦¾ test à¦•à¦°à§à¦¨à¥¤",
             ))
 
     if not issues:
@@ -725,8 +757,8 @@ async def signal_doctor(
             severity="ok",
             title="Signals look healthy",
             metric="All key checks passed",
-            impact="Facebook/TikTok/GA4 optimization-এর জন্য current event quality ভালো।",
-            fix="Campaign URL Builder ব্যবহার করে UTM discipline maintain করুন।",
+            impact="Facebook/TikTok/GA4 optimization-à¦à¦° à¦œà¦¨à§à¦¯ current event quality à¦­à¦¾à¦²à§‹à¥¤",
+            fix="Campaign URL Builder à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦° à¦•à¦°à§‡ UTM discipline maintain à¦•à¦°à§à¦¨à¥¤",
         ))
 
     score = max(0, min(100, score))
@@ -747,7 +779,7 @@ async def signal_doctor(
     )
 
 
-# ─── GET /analytics/export — CSV Export ──────────────────────────────────────
+# â”€â”€â”€ GET /analytics/export â€” CSV Export â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/analytics/export",
@@ -758,7 +790,7 @@ async def analytics_export(
     db: AsyncSession = Depends(get_db),
     days: int = Query(7, ge=1, le=30),
 ):
-    """সর্বশেষ N দিনের event logs CSV হিসেবে ডাউনলোড"""
+    """à¦¸à¦°à§à¦¬à¦¶à§‡à¦· N à¦¦à¦¿à¦¨à§‡à¦° event logs CSV à¦¹à¦¿à¦¸à§‡à¦¬à§‡ à¦¡à¦¾à¦‰à¦¨à¦²à§‹à¦¡"""
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
     result = await db.execute(
@@ -798,4 +830,199 @@ async def analytics_export(
         iter([output.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+# â”€â”€â”€ GET /analytics/ad-performance â€” Ad Performance & ROAS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@router.get(
+    "/analytics/ad-performance",
+    response_model=AdPerformanceResponse,
+    summary="Get ad performance and ROAS analytics",
+)
+async def ad_performance_analytics(
+    client: CachedClient = Depends(get_current_client),
+    db: AsyncSession = Depends(get_db),
+    days: int = Query(7, ge=1, le=90, description="à¦•à¦¤ à¦¦à¦¿à¦¨à§‡à¦° à¦¡à§‡à¦Ÿà¦¾"),
+):
+    """
+    Meta à¦à¦¬à¦‚ TikTok à¦•à§à¦¯à¦¾à¦®à§à¦ªà§‡à¦‡à¦¨à§‡à¦° ad spend à¦à¦¬à¦‚ CAPI conversion-à¦à¦° timezone-aware aggregate ROAS/CPA à¦¹à¦¿à¦¸à¦¾à¦¬ à¦•à¦°à§‡à¥¤
+    """
+    # Calculate start and end date based on days parameter
+    end_date = datetime.now(timezone.utc).date()
+    start_date = end_date - timedelta(days=days - 1)
+
+    is_postgresql = db.bind.dialect.name == "postgresql"
+
+    if is_postgresql:
+        tz_log_expr = "DATE(timezone(a.account_timezone, el.created_at))"
+        tz_pending_expr = "DATE(timezone(a.account_timezone, pe.created_at))"
+        json_camp_id_expr = "COALESCE(pe.event_data->'custom_data'->>'ad_campaign_id', pe.event_data->'custom_data'->>'bk_campaign_id', pe.event_data->>'ad_campaign_id')"
+        json_platform_expr = "COALESCE(pe.event_data->'custom_data'->>'ad_platform', pe.event_data->'custom_data'->>'bk_platform', pe.event_data->>'ad_platform')"
+        json_val_expr = "CAST(COALESCE(pe.event_data->'custom_data'->>'value', '0.0') AS float)"
+    else:
+        tz_log_expr = "DATE(el.created_at)"
+        tz_pending_expr = "DATE(pe.created_at)"
+        json_camp_id_expr = "COALESCE(json_extract(pe.event_data, '$.custom_data.ad_campaign_id'), json_extract(pe.event_data, '$.custom_data.bk_campaign_id'), json_extract(pe.event_data, '$.ad_campaign_id'))"
+        json_platform_expr = "COALESCE(json_extract(pe.event_data, '$.custom_data.ad_platform'), json_extract(pe.event_data, '$.custom_data.bk_platform'), json_extract(pe.event_data, '$.ad_platform'))"
+        json_val_expr = "CAST(COALESCE(json_extract(pe.event_data, '$.custom_data.value'), 0.0) AS float)"
+
+    query_str = f"""
+    WITH platform_insights AS (
+        SELECT
+            platform,
+            external_campaign_id,
+            SUM(spend) AS total_spend,
+            SUM(clicks) AS total_clicks,
+            SUM(impressions) AS total_impressions
+        FROM ad_insights_daily
+        WHERE client_id = :client_id
+          AND insight_date BETWEEN :start_date AND :end_date
+        GROUP BY platform, external_campaign_id
+    ),
+    server_confirmed_events AS (
+        SELECT
+            c.id AS campaign_pk,
+            COUNT(el.id) AS purchases,
+            COALESCE(SUM(el.value), 0.0) AS revenue
+        FROM event_logs el
+        JOIN ad_campaigns c ON el.ad_campaign_id = c.external_campaign_id
+        JOIN ad_accounts a ON c.ad_account_id = a.id
+        WHERE el.client_id = :client_id
+          AND a.client_id = :client_id
+          AND (el.ad_platform IS NULL OR el.ad_platform = c.platform)
+          AND el.event_name = 'Purchase'
+          AND el.status = 'success'
+          AND {tz_log_expr} BETWEEN :start_date AND :end_date
+        GROUP BY c.id
+    ),
+    server_held_events AS (
+        SELECT
+            c.id AS campaign_pk,
+            COUNT(pe.id) AS purchases,
+            COALESCE(SUM({json_val_expr}), 0.0) AS revenue
+        FROM pending_events pe
+        JOIN ad_campaigns c ON ({json_camp_id_expr}) = c.external_campaign_id
+        JOIN ad_accounts a ON c.ad_account_id = a.id
+        WHERE pe.client_id = :client_id
+          AND a.client_id = :client_id
+          AND ({json_platform_expr} IS NULL OR {json_platform_expr} = c.platform)
+          AND pe.status IN ('pending', 'cancelled', 'expired', 'courier_booked', 'courier_booking_queued')
+          AND {tz_pending_expr} BETWEEN :start_date AND :end_date
+        GROUP BY c.id
+    ),
+    browser_vs_server_discrepancy AS (
+        SELECT
+            c.id AS campaign_pk,
+            SUM(CASE WHEN el.event_name LIKE 'Browser%%:PageView' THEN 1 ELSE 0 END) AS browser_views,
+            SUM(CASE WHEN el.event_name = 'PageView' AND el.status = 'success' THEN 1 ELSE 0 END) AS server_views
+        FROM event_logs el
+        JOIN ad_campaigns c ON el.ad_campaign_id = c.external_campaign_id
+        JOIN ad_accounts a ON c.ad_account_id = a.id
+        WHERE el.client_id = :client_id
+          AND a.client_id = :client_id
+          AND (el.ad_platform IS NULL OR el.ad_platform = c.platform)
+          AND {tz_log_expr} BETWEEN :start_date AND :end_date
+        GROUP BY c.id
+    )
+    SELECT
+        c.external_campaign_id AS campaign_id,
+        c.name AS campaign_name,
+        c.platform,
+        COALESCE(p.total_spend, 0.0) AS spend,
+        COALESCE(p.total_clicks, 0) AS clicks,
+        COALESCE(p.total_impressions, 0) AS impressions,
+
+        -- Confirmed metrics
+        COALESCE(sc.purchases, 0) AS confirmed_purchases,
+        COALESCE(sc.revenue, 0.0) AS confirmed_revenue,
+
+        -- Placed metrics = Confirmed + Held
+        (COALESCE(sc.purchases, 0) + COALESCE(sh.purchases, 0)) AS placed_purchases,
+        (COALESCE(sc.revenue, 0.0) + COALESCE(sh.revenue, 0.0)) AS placed_revenue,
+
+        -- Discrepancy metrics
+        COALESCE(d.browser_views, 0) AS browser_page_views,
+        COALESCE(d.server_views, 0) AS server_page_views
+    FROM ad_campaigns c
+    JOIN ad_accounts a ON c.ad_account_id = a.id
+    LEFT JOIN platform_insights p ON c.external_campaign_id = p.external_campaign_id AND c.platform = p.platform
+    LEFT JOIN server_confirmed_events sc ON c.id = sc.campaign_pk
+    LEFT JOIN server_held_events sh ON c.id = sh.campaign_pk
+    LEFT JOIN browser_vs_server_discrepancy d ON c.id = d.campaign_pk
+    WHERE a.client_id = :client_id;
+    """
+
+    try:
+        result = await db.execute(
+            text(query_str),
+            {
+                "client_id": client.id,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        rows = result.fetchall()
+    except Exception as exc:
+        logger.error(f"Error executing ad-performance query: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Error retrieving ad performance analytics from the database."
+        )
+
+    data = []
+    for r in rows:
+        spend = float(r.spend or 0.0)
+        clicks = int(r.clicks or 0)
+        impressions = int(r.impressions or 0)
+
+        ctr = round((clicks / impressions * 100) if impressions > 0 else 0.0, 2)
+        cpc = round((spend / clicks) if clicks > 0 else 0.0, 2)
+
+        placed_purchases = int(r.placed_purchases or 0)
+        placed_revenue = float(r.placed_revenue or 0.0)
+        placed_roas = round((placed_revenue / spend) if spend > 0 else 0.0, 2)
+        placed_cpa = round((spend / placed_purchases) if placed_purchases > 0 else 0.0, 2)
+
+        confirmed_purchases = int(r.confirmed_purchases or 0)
+        confirmed_revenue = float(r.confirmed_revenue or 0.0)
+        confirmed_roas = round((confirmed_revenue / spend) if spend > 0 else 0.0, 2)
+        confirmed_cpa = round((spend / confirmed_purchases) if confirmed_purchases > 0 else 0.0, 2)
+
+        browser_page_views = int(r.browser_page_views or 0)
+        server_page_views = int(r.server_page_views or 0)
+
+        if server_page_views > 0:
+            tracking_bypass_rate = round(max(0.0, ((server_page_views - browser_page_views) / server_page_views) * 100), 1)
+        else:
+            tracking_bypass_rate = 0.0
+
+        data.append(
+            AdPerformanceRow(
+                campaign_id=r.campaign_id,
+                campaign_name=r.campaign_name,
+                platform=r.platform,
+                spend=spend,
+                clicks=clicks,
+                impressions=impressions,
+                ctr=ctr,
+                cpc=cpc,
+                placed_purchases=placed_purchases,
+                placed_revenue=placed_revenue,
+                placed_roas=placed_roas,
+                placed_cpa=placed_cpa,
+                confirmed_purchases=confirmed_purchases,
+                confirmed_revenue=confirmed_revenue,
+                confirmed_roas=confirmed_roas,
+                confirmed_cpa=confirmed_cpa,
+                browser_page_views=browser_page_views,
+                server_page_views=server_page_views,
+                tracking_bypass_rate=tracking_bypass_rate,
+            )
+        )
+
+    return AdPerformanceResponse(
+        status="success",
+        period_days=days,
+        data=data
     )

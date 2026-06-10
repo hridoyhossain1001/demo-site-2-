@@ -17,6 +17,17 @@ ALLOW_LEGACY_PLAINTEXT_TOKENS = os.getenv(
     "",
 ).lower() in ("true", "1", "yes")
 
+FALLBACK_ENCRYPTION_KEYS = os.getenv("FALLBACK_ENCRYPTION_KEYS", "")
+_fallback_fernets = []
+if FALLBACK_ENCRYPTION_KEYS:
+    for key in FALLBACK_ENCRYPTION_KEYS.split(","):
+        k = key.strip()
+        if k:
+            try:
+                _fallback_fernets.append(Fernet(k.encode()))
+            except ValueError:
+                logger.error("A fallback key in FALLBACK_ENCRYPTION_KEYS is invalid.")
+
 if not ENCRYPTION_KEY:
     raise RuntimeError("ENCRYPTION_KEY environment variable is required.")
 
@@ -36,6 +47,12 @@ def decrypt_token(encrypted: str, *, allow_legacy_plaintext: bool | None = None)
     try:
         return _fernet.decrypt(encrypted.encode()).decode()
     except InvalidToken:
+        for fallback in _fallback_fernets:
+            try:
+                return fallback.decrypt(encrypted.encode()).decode()
+            except InvalidToken:
+                pass
+
         app_env = (os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or os.getenv("ENV") or "").lower()
         is_production = app_env in ("production", "prod") or bool(os.getenv("PRIMARY_DOMAIN"))
         allow_fallback = bool(allow_legacy_plaintext) and ALLOW_LEGACY_PLAINTEXT_TOKENS

@@ -1,13 +1,13 @@
-"""
+﻿"""
 Client Health & Usage Analytics Router
-────────────────────────────────────────
-Feature 5: Client Health Dashboard — প্রতিটি ক্লায়েন্টের "স্বাস্থ্য" দেখা
-Feature 7: Usage Analytics Page — মাসিক ইভেন্ট ব্যবহার ট্র্যাকিং
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+Feature 5: Client Health Dashboard â€” à¦ªà§à¦°à¦¤à¦¿à¦Ÿà¦¿ à¦•à§à¦²à¦¾à¦¯à¦¼à§‡à¦¨à§à¦Ÿà§‡à¦° "à¦¸à§à¦¬à¦¾à¦¸à§à¦¥à§à¦¯" à¦¦à§‡à¦–à¦¾
+Feature 7: Usage Analytics Page â€” à¦®à¦¾à¦¸à¦¿à¦• à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦° à¦Ÿà§à¦°à§à¦¯à¦¾à¦•à¦¿à¦‚
 
 Endpoints:
-  GET /api/v1/client/health        — ক্লায়েন্টের tracking health status
-  GET /api/v1/client/usage         — মাসিক usage analytics + limit info
-  GET /api/v1/admin/clients/health — (Admin) সব ক্লায়েন্টের health overview
+  GET /api/v1/client/health        â€” à¦•à§à¦²à¦¾à¦¯à¦¼à§‡à¦¨à§à¦Ÿà§‡à¦° tracking health status
+  GET /api/v1/client/usage         â€” à¦®à¦¾à¦¸à¦¿à¦• usage analytics + limit info
+  GET /api/v1/admin/clients/health â€” (Admin) à¦¸à¦¬ à¦•à§à¦²à¦¾à¦¯à¦¼à§‡à¦¨à§à¦Ÿà§‡à¦° health overview
 """
 
 import logging
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ─── Response Schemas ────────────────────────────────────────────────────────
+# â”€â”€â”€ Response Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class ClientHealthResponse(BaseModel):
     status: str
@@ -100,7 +100,7 @@ async def client_api_health(
     }
 
 
-# ─── GET /client/health — Client Self-Health Check ──────────────────────────
+# â”€â”€â”€ GET /client/health â€” Client Self-Health Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/client/health",
@@ -111,7 +111,7 @@ async def client_health(
     client: CachedClient = Depends(get_current_client),
     db: AsyncSession = Depends(get_db),
 ):
-    """ক্লায়েন্টের ট্র্যাকিং সিস্টেমের স্বাস্থ্য পরীক্ষা — সমস্যা থাকলে issues তালিকায় দেখায়"""
+    """à¦•à§à¦²à¦¾à¦¯à¦¼à§‡à¦¨à§à¦Ÿà§‡à¦° à¦Ÿà§à¦°à§à¦¯à¦¾à¦•à¦¿à¦‚ à¦¸à¦¿à¦¸à§à¦Ÿà§‡à¦®à§‡à¦° à¦¸à§à¦¬à¦¾à¦¸à§à¦¥à§à¦¯ à¦ªà¦°à§€à¦•à§à¦·à¦¾ â€” à¦¸à¦®à¦¸à§à¦¯à¦¾ à¦¥à¦¾à¦•à¦²à§‡ issues à¦¤à¦¾à¦²à¦¿à¦•à¦¾à¦¯à¦¼ à¦¦à§‡à¦–à¦¾à¦¯à¦¼"""
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -151,23 +151,23 @@ async def client_health(
     is_healthy = True
 
     if last_event is None:
-        issues.append("⚠️ কোনো ইভেন্ট পাওয়া যায়নি — ট্র্যাকিং সেটআপ চেক করুন")
+        issues.append("âš ï¸ à¦•à§‹à¦¨à§‹ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦ªà¦¾à¦“à¦¯à¦¼à¦¾ à¦¯à¦¾à¦¯à¦¼à¦¨à¦¿ â€” à¦Ÿà§à¦°à§à¦¯à¦¾à¦•à¦¿à¦‚ à¦¸à§‡à¦Ÿà¦†à¦ª à¦šà§‡à¦• à¦•à¦°à§à¦¨")
         is_healthy = False
     elif hours_since and hours_since > 24:
-        issues.append(f"🔴 {hours_since} ঘন্টা ধরে কোনো ইভেন্ট আসেনি")
+        issues.append(f"ðŸ”´ {hours_since} à¦˜à¦¨à§à¦Ÿà¦¾ à¦§à¦°à§‡ à¦•à§‹à¦¨à§‹ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦†à¦¸à§‡à¦¨à¦¿")
         is_healthy = False
     elif hours_since and hours_since > 6:
-        issues.append(f"🟡 {hours_since} ঘন্টা ধরে কোনো ইভেন্ট আসেনি")
+        issues.append(f"ðŸŸ¡ {hours_since} à¦˜à¦¨à§à¦Ÿà¦¾ à¦§à¦°à§‡ à¦•à§‹à¦¨à§‹ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦†à¦¸à§‡à¦¨à¦¿")
 
     if rate < 90 and today_total > 0:
-        issues.append(f"🔴 Success rate কম: {rate}% — Facebook API সমস্যা হতে পারে")
+        issues.append(f"ðŸ”´ Success rate à¦•à¦®: {rate}% â€” Facebook API à¦¸à¦®à¦¸à§à¦¯à¦¾ à¦¹à¦¤à§‡ à¦ªà¦¾à¦°à§‡")
         is_healthy = False
 
     if today_failed > 10:
-        issues.append(f"⚠️ আজকে {today_failed}টি ইভেন্ট ফেইল হয়েছে")
+        issues.append(f"âš ï¸ à¦†à¦œà¦•à§‡ {today_failed}à¦Ÿà¦¿ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦«à§‡à¦‡à¦² à¦¹à¦¯à¦¼à§‡à¦›à§‡")
 
     if not issues:
-        issues.append("✅ সব কিছু ঠিক আছে!")
+        issues.append("âœ… à¦¸à¦¬ à¦•à¦¿à¦›à§ à¦ à¦¿à¦• à¦†à¦›à§‡!")
 
     return ClientHealthResponse(
         status="success",
@@ -183,7 +183,7 @@ async def client_health(
     )
 
 
-# ─── GET /client/usage — Monthly Usage Analytics ────────────────────────────
+# â”€â”€â”€ GET /client/usage â€” Monthly Usage Analytics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/client/usage",
@@ -195,7 +195,7 @@ async def client_usage(
     db: AsyncSession = Depends(get_db),
     days: int = Query(30, ge=1, le=90),
 ):
-    """এই মাসে কতটি ইভেন্ট ব্যবহার হয়েছে, লিমিট কত, এবং দৈনিক ব্রেকডাউন"""
+    """à¦à¦‡ à¦®à¦¾à¦¸à§‡ à¦•à¦¤à¦Ÿà¦¿ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦° à¦¹à¦¯à¦¼à§‡à¦›à§‡, à¦²à¦¿à¦®à¦¿à¦Ÿ à¦•à¦¤, à¦à¦¬à¦‚ à¦¦à§ˆà¦¨à¦¿à¦• à¦¬à§à¦°à§‡à¦•à¦¡à¦¾à¦‰à¦¨"""
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days)
 
@@ -263,7 +263,7 @@ async def client_usage(
     )
 
 
-# ─── GET /admin/clients/health — Admin: All Clients Health ──────────────────
+# â”€â”€â”€ GET /admin/clients/health â€” Admin: All Clients Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/admin/clients/health",
@@ -274,7 +274,7 @@ async def admin_clients_health(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_admin_api_key),
 ):
-    """অ্যাডমিন — সব ক্লায়েন্টের health status এক পেজে দেখুন"""
+    """à¦…à§à¦¯à¦¾à¦¡à¦®à¦¿à¦¨ â€” à¦¸à¦¬ à¦•à§à¦²à¦¾à¦¯à¦¼à§‡à¦¨à§à¦Ÿà§‡à¦° health status à¦à¦• à¦ªà§‡à¦œà§‡ à¦¦à§‡à¦–à§à¦¨"""
 
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -367,7 +367,7 @@ async def admin_clients_health(
     )
 
 
-# ─── GET /client/setup — Client: View Setup + API Key ───────────────────────
+# â”€â”€â”€ GET /client/setup â€” Client: View Setup + API Key â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get(
     "/client/setup",
@@ -377,7 +377,7 @@ async def client_get_setup(
     client: CachedClient = Depends(get_current_client),
     db: AsyncSession = Depends(get_db),
 ):
-    """Client-এর বর্তমান setup এবং API key দেখুন।"""
+    """Client-à¦à¦° à¦¬à¦°à§à¦¤à¦®à¦¾à¦¨ setup à¦à¦¬à¦‚ API key à¦¦à§‡à¦–à§à¦¨à¥¤"""
     client_r = await db.execute(select(Client).where(Client.id == client.id))
     c = client_r.scalar_one_or_none()
     if not c:
@@ -410,7 +410,7 @@ async def client_get_setup(
     }
 
 
-# ─── PATCH /client/setup — Client: Update Tracking Settings ─────────────────
+# â”€â”€â”€ PATCH /client/setup â€” Client: Update Tracking Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class ClientSetupRequest(BaseModel):
     domain: Optional[str] = None
@@ -436,7 +436,7 @@ async def client_update_setup(
     client: CachedClient = Depends(get_current_client),
     db: AsyncSession = Depends(get_db),
 ):
-    """Client নিজের Facebook Pixel, TikTok, GA4 settings আপডেট করতে পারবে।"""
+    """Client à¦¨à¦¿à¦œà§‡à¦° Facebook Pixel, TikTok, GA4 settings à¦†à¦ªà¦¡à§‡à¦Ÿ à¦•à¦°à¦¤à§‡ à¦ªà¦¾à¦°à¦¬à§‡à¥¤"""
     from app.security import encrypt_token
     import re
 
@@ -541,3 +541,75 @@ async def client_update_setup(
         "test_event_code_set": bool((getattr(c, "test_event_code", "") or "").strip()),
         "tiktok_test_event_code_set": bool((getattr(c, "tiktok_test_event_code", "") or "").strip()),
     }
+
+
+@router.get(
+    "/client/system-health",
+    summary="Client system health metrics",
+)
+async def client_system_health(
+    client: CachedClient = Depends(get_current_client),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns client-specific system health metrics:
+    - outbox_depth (queued, processing, dead, sent counts)
+    - processed_rate_per_min (sent count in last 5 minutes / 5)
+    - avg_latency_sec (average seconds between outbox creation and sent_at in last 5 minutes)
+    - redis_fallback_total (system-wide Redis status counters)
+    """
+    try:
+        from app.models.event_outbox import EventOutbox
+        # Outbox depth counts
+        rows = await db.execute(
+            select(EventOutbox.status, sql_func.count(EventOutbox.id))
+            .where(EventOutbox.client_id == client.id)
+            .group_by(EventOutbox.status)
+        )
+        outbox_depth = {str(status): int(count or 0) for status, count in rows}
+
+        # Ensure all standard statuses exist in dict
+        for status in ("queued", "processing", "dead", "sent"):
+            if status not in outbox_depth:
+                outbox_depth[status] = 0
+
+        # Processed rate & latency over last 5 minutes
+        five_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+        sent_items_r = await db.execute(
+            select(EventOutbox.created_at, EventOutbox.sent_at)
+            .where(and_(
+                EventOutbox.client_id == client.id,
+                EventOutbox.status == "sent",
+                EventOutbox.sent_at >= five_mins_ago
+            ))
+        )
+        sent_items = sent_items_r.all()
+
+        processed_count = len(sent_items)
+        processed_rate_per_min = round(processed_count / 5.0, 2)
+
+        latencies = []
+        for created_at, sent_at in sent_items:
+            if created_at and sent_at:
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                if sent_at.tzinfo is None:
+                    sent_at = sent_at.replace(tzinfo=timezone.utc)
+                latencies.append((sent_at - created_at).total_seconds())
+
+        avg_latency_sec = round(sum(latencies) / len(latencies), 2) if latencies else 0.0
+
+        # Global Redis fallback counts
+        from app.services.redis_pool import redis_fallback_counts
+        redis_fallback = redis_fallback_counts()
+
+        return {
+            "status": "success",
+            "outbox_depth": outbox_depth,
+            "processed_rate_per_min": processed_rate_per_min,
+            "avg_latency_sec": avg_latency_sec,
+            "redis_fallback_total": redis_fallback,
+        }
+    except Exception as e:
+        logger.exception("Client system-health endpoint failed")
+        raise HTTPException(status_code=500, detail="Internal server error")

@@ -19,9 +19,11 @@ from app.routers.deferred_events import router as deferred_events_router
 from app.routers.analytics import router as analytics_router
 from app.routers.debug import router as debug_router
 from app.routers.client_auth import router as client_auth_router
+from app.routers.ad_accounts import router as ad_accounts_router
 from app.limiter import limiter
 import os
 import asyncio
+import secrets
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 if not ADMIN_API_KEY:
@@ -107,6 +109,7 @@ def _default_content_security_policy() -> str:
 
 
 CONTENT_SECURITY_POLICY = os.getenv("CONTENT_SECURITY_POLICY") or _default_content_security_policy()
+CSP_STRICT_NONCE = os.getenv("CSP_STRICT_NONCE", "false").lower() in ("1", "true", "yes")
 SECURITY_HEADERS = {
     "content-security-policy": CONTENT_SECURITY_POLICY,
     "referrer-policy": os.getenv("REFERRER_POLICY", "strict-origin-when-cross-origin"),
@@ -210,6 +213,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("ℹ️  Maintenance loops web process-এ নিষ্ক্রিয়; worker process ব্যবহার করুন।")
 
+    # 🔄 Ad Sync Worker
+    if os.getenv("ENABLE_AD_SYNC", "").lower() in ("true", "1", "yes"):
+        from app.services.ad_sync_worker import run_ad_sync_forever
+        _launch(run_ad_sync_forever(), name="ad-sync-worker")
+        logger.info("Ad spend sync worker started.")
+    else:
+        logger.info("Ad spend sync worker disabled (ENABLE_AD_SYNC not set).")
+
     # 🌍 GeoIP Database Load
     from app.services.geoip_service import download_geoip_db_if_missing, close_geoip_db
     await download_geoip_db_if_missing()
@@ -247,8 +258,17 @@ app = FastAPI(
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+async def custom_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"error": "Rate limit exceeded!", "error_code": "RATE_LIMIT_EXCEEDED"}
+    )
+
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, custom_rate_limit_handler)
 app.mount("/static/css", StaticFiles(directory="app/static/css"), name="static-css")
 app.mount("/static/js", StaticFiles(directory="app/static/js"), name="static-js")
 app.mount(
@@ -307,11 +327,21 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        nonce = secrets.token_urlsafe(16) if CSP_STRICT_NONCE and not os.getenv("CONTENT_SECURITY_POLICY") else ""
+        if nonce:
+            scope.setdefault("state", {})
+            scope["state"]["csp_nonce"] = nonce
+
         async def send_with_security_headers(message):
             if message["type"] == "http.response.start":
                 response_headers = list(message.get("headers", []))
                 existing = {name.lower() for name, _ in response_headers}
                 for name, value in SECURITY_HEADERS.items():
+                    if name == "content-security-policy" and nonce:
+                        value = value.replace(
+                            "script-src 'self' 'unsafe-inline'",
+                            f"script-src 'self' 'nonce-{nonce}'",
+                        )
                     header_name = name.encode("latin1")
                     if header_name not in existing:
                         response_headers.append((header_name, value.encode("latin1")))
@@ -453,6 +483,7 @@ app.include_router(client_portal_router, tags=["Client Portal"])
 app.include_router(tracker_router, tags=["Tracker"])  # /t.js, /c — root level, no prefix
 app.include_router(deferred_events_router, prefix="/api/v1", tags=["Deferred Events"])
 app.include_router(analytics_router, prefix="/api/v1", tags=["Analytics"])
+app.include_router(ad_accounts_router, prefix="/api/v1", tags=["Ad Accounts"])
 # Debug endpoints শুধু ENABLE_DEBUG=true হলে expose হবে — প্রোডাকশনে false রাখুন
 if os.getenv("ENABLE_DEBUG", "").lower() in ("true", "1", "yes"):
     app.include_router(debug_router, prefix="/api/v1", tags=["Debug & Testing"])

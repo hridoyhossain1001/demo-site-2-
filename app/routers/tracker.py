@@ -9,6 +9,8 @@ Endpoints:
 """
 
 import json
+import hashlib
+import hmac
 import logging
 import os
 import time
@@ -26,7 +28,7 @@ from app.models.client import Client
 from app.services.dedup_service import reserve_unique_event_ids
 from app.services.fast_ingest_service import dedup_reserve_usage_and_enqueue_stream
 from app.schemas.event import EventData, UserData, CustomData
-from app.services.bot_detector import is_bot
+from app.services.bot_detector import classify_traffic
 from app.services.event_quality import boost_event_quality
 from app.services.geoip_service import get_location_data
 from app.services.event_worker import enqueue_events
@@ -42,10 +44,36 @@ router = APIRouter()
 TRACKER_COOKIE_DOMAIN = os.getenv("TRACKER_COOKIE_DOMAIN", "").strip() or None
 EVENT_INGEST_MODE = os.getenv("EVENT_INGEST_MODE", "db").strip().lower()
 TRACKER_ENRICH_IN_REQUEST = os.getenv("TRACKER_ENRICH_IN_REQUEST", "false").lower() in ("true", "1", "yes")
+TRACKER_INGEST_TOKEN_TTL_SECONDS = int(os.getenv("TRACKER_INGEST_TOKEN_TTL_SECONDS", "900"))
+REQUIRE_TRACKER_INGEST_TOKEN = os.getenv("REQUIRE_TRACKER_INGEST_TOKEN", "false").lower() in ("1", "true", "yes")
 
 
 def _fast_stream_ingest_enabled() -> bool:
     return EVENT_INGEST_MODE == "redis_stream" and bool(os.getenv("REDIS_URL"))
+
+
+def _tracker_ingest_signature(secret: str, public_key: str, expires_at: int, nonce: str) -> str:
+    message = f"{public_key}.{expires_at}.{nonce}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _issue_tracker_ingest_token(client: CachedClient, public_key: str) -> str:
+    nonce = hashlib.sha256(f"{client.id}.{time.time_ns()}".encode("utf-8")).hexdigest()[:16]
+    expires_at = int(time.time()) + TRACKER_INGEST_TOKEN_TTL_SECONDS
+    signature = _tracker_ingest_signature(client.api_key, public_key, expires_at, nonce)
+    return f"{expires_at}.{nonce}.{signature}"
+
+
+def _verify_tracker_ingest_token(client: CachedClient, public_key: str, token: str) -> bool:
+    try:
+        expires_raw, nonce, signature = (token or "").split(".", 2)
+        expires_at = int(expires_raw)
+    except (TypeError, ValueError):
+        return False
+    if expires_at < int(time.time()) or expires_at > int(time.time()) + (TRACKER_INGEST_TOKEN_TTL_SECONDS * 2):
+        return False
+    expected = _tracker_ingest_signature(client.api_key, public_key, expires_at, nonce)
+    return hmac.compare_digest(expected, signature)
 
 
 def _get_tracker_cookie_domain(request: Request) -> str | None:
@@ -182,7 +210,8 @@ async def serve_tracker_js(
     gateway_origin = f"{scheme}://{host}"
 
     # Generate JS
-    js_code = generate_tracker_js(api_key=key, gateway_origin=gateway_origin)
+    ingest_token = _issue_tracker_ingest_token(client, key)
+    js_code = generate_tracker_js(api_key=key, gateway_origin=gateway_origin, ingest_token=ingest_token)
 
     return Response(
         content=js_code,
@@ -203,6 +232,7 @@ async def serve_tracker_js(
 async def collect_event(
     request: Request,
     key: str = Query(..., description="Client API Key"),
+    token: str = Query("", description="Short-lived tracker ingest token"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -225,16 +255,21 @@ async def collect_event(
 
     # ─── Validate API Key ─────────────────────────────────────────────
     client = await _get_client_by_key(key, db)
+    if REQUIRE_TRACKER_INGEST_TOKEN and not _verify_tracker_ingest_token(client, key, token):
+        raise HTTPException(status_code=401, detail="Invalid tracker ingest token")
 
     # ─── Real IP Detection ────────────────────────────────────────────
     client_ip = _get_real_ip(request)
 
     # ─── Bot Detection ────────────────────────────────────────────────
     user_agent = request.headers.get("user-agent", "")
-    if is_bot(user_agent):
+    traffic_class = classify_traffic(user_agent, ip=client_ip, has_cookie=bool(request.cookies))
+    if traffic_class == "bot":
         logger.info(f"[{client.name}] 🤖 Bot event dropped from tracker")
         # Return 200 to not leak bot detection to caller
         return {"status": "ok", "events_received": 0, "message": "processed"}
+    if traffic_class == "suspicious":
+        logger.info(f"[{client.name}] Suspicious tracker traffic accepted for observation")
 
     # ─── Domain Whitelisting ──────────────────────────────────────────
     if client.domain:

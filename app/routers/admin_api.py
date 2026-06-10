@@ -1,4 +1,4 @@
-import os
+﻿import os
 import secrets
 import logging
 import hmac
@@ -120,11 +120,11 @@ class AdminSiteBindingTransfer(BaseModel):
 import jwt as pyjwt
 
 def create_jwt(payload: dict, secret: str) -> str:
-    """PyJWT দিয়ে HS256 JWT token তৈরি করো।"""
+    """PyJWT à¦¦à¦¿à¦¯à¦¼à§‡ HS256 JWT token à¦¤à§ˆà¦°à¦¿ à¦•à¦°à§‹à¥¤"""
     return pyjwt.encode(payload, secret, algorithm="HS256")
 
 def decode_jwt(token: str, secret: str) -> dict:
-    """PyJWT দিয়ে JWT token decode ও verify করো।"""
+    """PyJWT à¦¦à¦¿à¦¯à¦¼à§‡ JWT token decode à¦“ verify à¦•à¦°à§‹à¥¤"""
     try:
         return pyjwt.decode(token, secret, algorithms=["HS256"])
     except pyjwt.ExpiredSignatureError:
@@ -635,6 +635,40 @@ def _read_cpu_metrics(load_avg: list[float] | None) -> dict:
 def _read_server_runtime() -> dict:
     import shutil
     import socket
+    import sys
+
+    # Try using psutil for memory, cpu, and disk details
+    psutil_data = {}
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        cpu_pct = psutil.cpu_percent(interval=None)
+        cpu_count = psutil.cpu_count(logical=True)
+        psutil_data = {
+            "memory": {
+                "total_bytes": vm.total,
+                "used_bytes": vm.used,
+                "free_bytes": vm.free,
+                "used_percent": vm.percent,
+            },
+            "cpu": {
+                "percent": cpu_pct,
+                "used_percent": cpu_pct,
+                "cores": cpu_count,
+            },
+            "disk": {
+                "total_bytes": psutil.disk_usage("/").total,
+                "used_bytes": psutil.disk_usage("/").used,
+                "free_bytes": psutil.disk_usage("/").free,
+                "used_percent": psutil.disk_usage("/").percent,
+            },
+            "process": {
+                "pid": os.getpid(),
+                "rss_bytes": psutil.Process(os.getpid()).memory_info().rss,
+            }
+        }
+    except Exception:
+        pass
 
     load_avg = None
     try:
@@ -643,25 +677,31 @@ def _read_server_runtime() -> dict:
         pass
     uptime_seconds = None
     try:
-        with open("/proc/uptime", "r", encoding="utf-8") as handle:
-            uptime_seconds = float(handle.read().split()[0])
+        # Check psutil for boot time
+        if "psutil" in sys.modules:
+            import psutil
+            uptime_seconds = time.time() - psutil.boot_time()
+        else:
+            with open("/proc/uptime", "r", encoding="utf-8") as handle:
+                uptime_seconds = float(handle.read().split()[0])
     except Exception:
         pass
-    process_rss_bytes = None
-    try:
-        import resource
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        process_rss_bytes = int(rss * 1024)
-    except Exception:
-        pass
+    process_rss_bytes = psutil_data.get("process", {}).get("rss_bytes")
+    if process_rss_bytes is None:
+        try:
+            import resource
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            process_rss_bytes = int(rss * 1024)
+        except Exception:
+            pass
     disk = shutil.disk_usage("/")
     return {
         "hostname": socket.gethostname(),
         "load_average": load_avg,
-        "cpu": _read_cpu_metrics(load_avg),
+        "cpu": psutil_data.get("cpu") or _read_cpu_metrics(load_avg),
         "uptime_seconds": uptime_seconds,
-        "memory": _read_linux_memory(),
-        "disk": {
+        "memory": psutil_data.get("memory") or _read_linux_memory(),
+        "disk": psutil_data.get("disk") or {
             "total_bytes": disk.total,
             "used_bytes": disk.used,
             "free_bytes": disk.free,
@@ -686,6 +726,34 @@ async def _worker_monitor(db: AsyncSession) -> dict:
     active_event_jobs = event_outbox.get("queued", 0) + event_outbox.get("processing", 0)
     dead_events = event_outbox.get("dead", 0) + failed_events.get("dead", 0)
     status = "critical" if dead_events or courier_queue["alert_status"] == "critical" else "warning" if active_event_jobs > 100 or courier_queue["alert_status"] == "warning" else "healthy"
+
+    # Processed rate and latency metrics over the last 5 minutes
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import and_
+    five_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
+    sent_items_r = await db.execute(
+        select(EventOutbox.created_at, EventOutbox.sent_at)
+        .where(and_(EventOutbox.status == "sent", EventOutbox.sent_at >= five_mins_ago))
+    )
+    sent_items = sent_items_r.all()
+
+    processed_count = len(sent_items)
+    processed_rate_per_min = round(processed_count / 5.0, 2)
+
+    latencies = []
+    for created_at, sent_at in sent_items:
+        if created_at and sent_at:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            if sent_at.tzinfo is None:
+                sent_at = sent_at.replace(tzinfo=timezone.utc)
+            latencies.append((sent_at - created_at).total_seconds())
+
+    avg_latency_sec = round(sum(latencies) / len(latencies), 2) if latencies else 0.0
+
+    from app.services.redis_pool import redis_fallback_counts
+    fallback_counts = redis_fallback_counts()
+
     return {
         "status": status,
         "event_outbox": event_outbox,
@@ -693,6 +761,9 @@ async def _worker_monitor(db: AsyncSession) -> dict:
         "courier_booking_queue": courier_queue,
         "active_event_jobs": active_event_jobs,
         "dead_event_jobs": dead_events,
+        "processed_rate_per_min": processed_rate_per_min,
+        "avg_latency_sec": avg_latency_sec,
+        "redis_fallback_total": fallback_counts,
     }
 
 
@@ -744,15 +815,17 @@ async def admin_api_server_health(
 ):
     db_ok = False
     redis_ok = False
+    redis_fallback_total = {}
     try:
         await db.execute(text("SELECT 1"))
         db_ok = True
     except Exception:
         logger.exception("Admin server-health DB check failed")
     try:
-        from app.services.redis_pool import get_redis
+        from app.services.redis_pool import get_redis, redis_fallback_counts
 
         redis = get_redis()
+        redis_fallback_total = redis_fallback_counts()
         if redis:
             await redis.ping()
             redis_ok = True
@@ -767,6 +840,7 @@ async def admin_api_server_health(
         "status": status,
         "db": db_ok,
         "redis": redis_ok,
+        "redis_fallback_total": redis_fallback_total,
         "server": _read_server_runtime(),
         "worker_monitor": worker_monitor,
     }
@@ -1177,8 +1251,11 @@ async def admin_api_rotate_key(
 
     old_key = client.api_key
     if key_type == "api_key":
+        client.old_api_key = old_key
+        client.api_key_rotated_at = datetime.now(timezone.utc)
         client.api_key = secrets.token_urlsafe(32)
         clear_client_cache(old_key)
+        clear_client_cache(client.api_key)
     elif key_type == "portal_key":
         client.portal_key = secrets.token_urlsafe(16)
     elif key_type == "public_key" and hasattr(client, "public_key"):

@@ -77,20 +77,23 @@ def _quantity(value: Any) -> int:
 
 def _stable_event_suffix(event: EventData) -> str:
     custom_data = event.custom_data.model_dump(exclude_none=True) if event.custom_data else {}
+    user_data = event.user_data.model_dump(exclude_none=True) if event.user_data else {}
+    external_ids = user_data.get("external_id") or []
+    identity = str(external_ids[0]) if external_ids else ""
     basis = "|".join(
         [
-            event.event_name or "",
-            str(event.event_time or ""),
-            event.event_source_url or "",
+            str(event.event_name or "").lower(),
             ",".join(custom_data.get("content_ids") or []),
             str(custom_data.get("value") or ""),
+            event.event_source_url or "",
+            identity,
         ]
     )
-    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.md5(basis.encode("utf-8")).hexdigest()[:20]
     return digest
 
 
-def calculate_emq_score(event: EventData) -> float:
+def calculate_emq_score(event: EventData, *, customer_provided_only: bool = True) -> float:
     """
     Calculate a realistic Event Match Quality (EMQ) score from 0.0 to 10.0
     based on official Meta (Facebook) CAPI and TikTok Events API guidelines.
@@ -132,13 +135,14 @@ def calculate_emq_score(event: EventData) -> float:
     if has_list_val(ud.external_id):
         score += 1.0
 
-    # 6. IP Address - 0.5 point
-    if has_str_val(ud.client_ip_address):
-        score += 0.5
+    if not customer_provided_only:
+        # 6. IP Address - 0.5 point
+        if has_str_val(ud.client_ip_address):
+            score += 0.5
 
-    # 7. User Agent - 0.5 point
-    if has_str_val(ud.client_user_agent):
-        score += 0.5
+        # 7. User Agent - 0.5 point
+        if has_str_val(ud.client_user_agent):
+            score += 0.5
 
     # 8. Individual PII parameters - 0.3 to 0.4 points each
     if has_list_val(ud.fn):
@@ -186,7 +190,7 @@ def boost_event_quality(
         event.user_data.ttclid = cookies["_ttclid"]
 
     if not event.event_id:
-        event.event_id = f"auto_{event.event_name}_{_stable_event_suffix(event)}"
+        event.event_id = f"bk_{str(event.event_name or '').lower()}_{_stable_event_suffix(event)}"
 
     if event.event_name in COMMERCE_EVENTS:
         if not event.custom_data:
@@ -282,8 +286,16 @@ def boost_event_quality(
             slugified = str(utm_camp).strip().lower().replace(" ", "_").replace("-", "_")
             set_extra(cd, "utm_campaign", slugified)
 
+    if not event.custom_data:
+        event.custom_data = CustomData()
+    try:
+        setattr(event.custom_data, "_enriched", True)
+    except Exception:
+        if isinstance(getattr(event.custom_data, "model_extra", None), dict):
+            event.custom_data.model_extra["_enriched"] = True
+
     # Automatically calculate and set the EMQ score
-    event.emq_score = calculate_emq_score(event)
+    event.emq_score = calculate_emq_score(event, customer_provided_only=True)
 
     return event
 

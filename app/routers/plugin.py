@@ -9,6 +9,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -64,6 +65,13 @@ PLUGIN_ZIP_PATH = Path(
 PLUGIN_DOWNLOAD_URL = os.getenv("PLUGIN_DOWNLOAD_URL", "")
 PLUGIN_PROTECTED_PACKAGE = plugin_protection_enabled()
 PLUGIN_PRECONFIGURED_DOWNLOADS = os.getenv("PLUGIN_PRECONFIGURED_DOWNLOADS", "false").lower() in {"1", "true", "yes"}
+PUBLIC_GATEWAY_BASE_URL = os.getenv("PUBLIC_GATEWAY_BASE_URL", "").rstrip("/")
+ALLOWED_GATEWAY_HOSTS = {
+    h.strip().lower()
+    for h in os.getenv("ALLOWED_GATEWAY_HOSTS", "").split(",")
+    if h.strip()
+}
+DEV_GATEWAY_HOSTS = {"localhost", "127.0.0.1", "testserver"}
 
 
 # Cache for plugin zip SHA256 and size to prevent high Disk I/O and CPU overhead
@@ -153,9 +161,7 @@ async def plugin_update_check(
 
 
 def _plugin_download_url(request: Request) -> str:
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("host", request.url.netloc)
-    return f"{scheme}://{host}/api/v1/plugin/download"
+    return f"{_gateway_base_url(request)}/api/v1/plugin/download"
 
 
 def _plugin_update_response(download_url: str, package_sha256: str, signature: str) -> JSONResponse:
@@ -427,9 +433,30 @@ def _plugin_update_response(download_url: str, package_sha256: str, signature: s
 
 def _build_gateway_url(request: Request) -> str:
     """Determine the canonical gateway API URL for plugin pre-configuration."""
+    return f"{_gateway_base_url(request)}/api/v1"
+
+
+def _gateway_base_url(request: Request) -> str:
+    """Return a trusted gateway origin without blindly trusting Host headers."""
+    if PUBLIC_GATEWAY_BASE_URL:
+        parsed = urlparse(PUBLIC_GATEWAY_BASE_URL)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=500, detail="Invalid PUBLIC_GATEWAY_BASE_URL")
+        return PUBLIC_GATEWAY_BASE_URL
+
+    raw_host = (request.headers.get("host") or request.url.netloc or "").strip().lower()
+    hostname = raw_host.split(":", 1)[0].rstrip(".")
+    allowed_hosts = ALLOWED_GATEWAY_HOSTS | DEV_GATEWAY_HOSTS
+    if hostname not in allowed_hosts:
+        raise HTTPException(status_code=400, detail="Untrusted or unconfigured gateway host")
+
     scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("host", request.url.netloc)
-    return f"{scheme}://{host}/api/v1"
+    scheme = str(scheme).split(",", 1)[0].strip().lower()
+    if scheme not in {"http", "https"}:
+        scheme = "https"
+    if scheme != "https" and hostname not in DEV_GATEWAY_HOSTS:
+        scheme = "https"
+    return f"{scheme}://{raw_host}"
 
 
 def _generate_preconfigured_zip(api_key: str, gateway_url: str) -> io.BytesIO:
@@ -439,6 +466,8 @@ def _generate_preconfigured_zip(api_key: str, gateway_url: str) -> io.BytesIO:
     যাতে ইনস্টল করার পর কোনো ম্যানুয়াল কনফিগারেশন দরকার না হয়।
     """
     cache_key = (api_key, gateway_url)
+    if not re.fullmatch(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", gateway_url):
+        raise HTTPException(status_code=500, detail="Invalid generated gateway URL")
     if cache_key in _PRECONFIGURED_ZIP_CACHE:
         return io.BytesIO(_PRECONFIGURED_ZIP_CACHE[cache_key])
 

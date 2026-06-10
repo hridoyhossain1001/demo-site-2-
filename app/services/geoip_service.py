@@ -17,6 +17,7 @@ MAXMIND_EDITION_ID = os.getenv("MAXMIND_EDITION_ID", "GeoLite2-City")
 MAXMIND_ACCOUNT_ID = os.getenv("MAXMIND_ACCOUNT_ID", "")
 MAXMIND_LICENSE_KEY = os.getenv("MAXMIND_LICENSE_KEY", "")
 GEOIP_MAX_AGE_DAYS = int(os.getenv("GEOIP_MAX_AGE_DAYS", "7"))
+ALLOW_GEOIP_FALLBACK_MIRROR = os.getenv("ALLOW_GEOIP_FALLBACK_MIRROR", "false").lower() in {"1", "true", "yes"}
 
 _reader = None
 
@@ -107,26 +108,38 @@ async def download_geoip_db_if_missing():
     """Download or refresh the GeoLite2 City database, then load the reader."""
     global _reader
     if _db_is_stale():
-        source = "official MaxMind" if MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY else "fallback mirror"
-        logger.info(f"Refreshing GeoIP database from {source} (this may take a minute)...")
-        tmp_path = f"{DB_PATH}.part"
-        try:
-            if MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY:
-                await _download_official_maxmind_db(tmp_path)
-            else:
-                await _download_fallback_geoip_db(tmp_path)
-            os.replace(tmp_path, DB_PATH)
-            _lookup_location_data.cache_clear()
-            logger.info("GeoIP database refreshed successfully.")
-        except Exception as e:
-            logger.error(f"Failed to download GeoIP database: {e}")
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except OSError:
-                pass
+        has_official_credentials = bool(MAXMIND_ACCOUNT_ID and MAXMIND_LICENSE_KEY)
+        if not has_official_credentials and not ALLOW_GEOIP_FALLBACK_MIRROR:
+            logger.error(
+                "GeoIP database missing/stale and MaxMind credentials are not configured. "
+                "Set MAXMIND_ACCOUNT_ID/MAXMIND_LICENSE_KEY or explicitly enable "
+                "ALLOW_GEOIP_FALLBACK_MIRROR=true to use the third-party mirror."
+            )
             if not os.path.exists(DB_PATH):
                 return
+            logger.warning("Using existing stale GeoIP database; refresh skipped.")
+        else:
+            source = "official MaxMind" if has_official_credentials else "fallback mirror"
+            logger.info(f"Refreshing GeoIP database from {source} (this may take a minute)...")
+            tmp_path = f"{DB_PATH}.part"
+            try:
+                if has_official_credentials:
+                    await _download_official_maxmind_db(tmp_path)
+                else:
+                    logger.warning("Using third-party GeoIP mirror because ALLOW_GEOIP_FALLBACK_MIRROR=true.")
+                    await _download_fallback_geoip_db(tmp_path)
+                os.replace(tmp_path, DB_PATH)
+                _lookup_location_data.cache_clear()
+                logger.info("GeoIP database refreshed successfully.")
+            except Exception as e:
+                logger.error(f"Failed to download GeoIP database: {e}")
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+                if not os.path.exists(DB_PATH):
+                    return
 
     # Initialize reader
     try:

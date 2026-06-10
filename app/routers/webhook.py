@@ -28,6 +28,7 @@ from app.schemas.event import EventData
 from app.services.event_quality import boost_event_quality
 from app.services.event_worker import enqueue_events
 from app.services.usage_service import check_and_reserve_usage
+from app.services.identity import hash_phone
 from app.dependencies import CachedClient, _snapshot
 from app.routers.deferred_events import _auto_book_courier_for_pending, _queue_confirmed_event
 from app.security import decrypt_token
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 REQUIRE_WC_WEBHOOK_SIGNATURE = os.getenv("REQUIRE_WC_WEBHOOK_SIGNATURE", "true").lower() in ("1", "true", "yes")
+ALLOW_WC_WEBHOOK_API_KEY_SECRET_FALLBACK = os.getenv(
+    "ALLOW_WC_WEBHOOK_API_KEY_SECRET_FALLBACK",
+    "false",
+).lower() in ("1", "true", "yes")
+ALLOW_SHOPIFY_PLAINTEXT_SHARED_SECRET = os.getenv(
+    "ALLOW_SHOPIFY_PLAINTEXT_SHARED_SECRET",
+    "false",
+).lower() in ("1", "true", "yes")
 
 
 def _bearer_token(request: Request) -> str:
@@ -81,7 +90,11 @@ def _verify_shopify_signature(raw_body: bytes, signature: str, secret: str) -> b
         return False
     try:
         decrypted_secret = decrypt_token(secret)
-    except Exception:
+    except Exception as exc:
+        if not ALLOW_SHOPIFY_PLAINTEXT_SHARED_SECRET:
+            logger.warning(f"Shopify shared secret decrypt failed; plaintext fallback disabled: {exc}")
+            return False
+        logger.warning("Shopify shared secret decrypt failed; using legacy plaintext fallback.")
         decrypted_secret = secret
     digest = hmac.new(decrypted_secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
     expected = base64.b64encode(digest).decode()
@@ -126,7 +139,12 @@ async def woocommerce_webhook(
     client = _snapshot(client_row)
     raw_body = await request.body()
     signature = request.headers.get("x-wc-webhook-signature", "")
-    webhook_secret = os.getenv("WC_WEBHOOK_SECRET", "") or api_key
+    webhook_secret = os.getenv("WC_WEBHOOK_SECRET", "")
+    if not webhook_secret and ALLOW_WC_WEBHOOK_API_KEY_SECRET_FALLBACK:
+        logger.warning("Using legacy WooCommerce webhook API-key signature fallback.")
+        webhook_secret = api_key
+    if REQUIRE_WC_WEBHOOK_SIGNATURE and not webhook_secret:
+        raise HTTPException(status_code=401, detail="WooCommerce webhook secret is not configured")
     if REQUIRE_WC_WEBHOOK_SIGNATURE and not _verify_wc_signature(raw_body, signature, webhook_secret):
         raise HTTPException(status_code=401, detail="Invalid WooCommerce webhook signature")
 
@@ -142,6 +160,19 @@ async def woocommerce_webhook(
 
     if not order_id:
         raise HTTPException(status_code=400, detail="Order ID not found in payload")
+
+    # Webhook Replay Protection
+    from app.services.redis_pool import get_redis
+    redis = get_redis()
+    if redis:
+        webhook_id = request.headers.get("x-wc-webhook-id") or f"wc:{client.id}:{order_id}:{status}"
+        try:
+            is_new = await redis.set(f"webhook_replay:{webhook_id}", "1", ex=86400, nx=True)
+            if not is_new:
+                logger.info(f"[{client.name}] WooCommerce duplicate webhook ignored: {webhook_id}")
+                return {"status": "ignored", "detail": "Duplicate webhook delivery"}
+        except Exception as re_exc:
+            logger.warning(f"[{client.name}] Redis WooCommerce replay check failed: {re_exc}")
 
     logger.info(f"[{client.name}] 📬 WooCommerce webhook: order #{order_id}, status: {status}")
 
@@ -290,6 +321,19 @@ async def shopify_webhook(
     if not order_id:
         raise HTTPException(status_code=400, detail="Shopify Order ID not found in payload")
 
+    # Webhook Replay Protection
+    from app.services.redis_pool import get_redis
+    redis = get_redis()
+    if redis:
+        webhook_id = request.headers.get("x-shopify-webhook-id") or f"shopify:{client.id}:{order_id}:{body.get('updated_at')}"
+        try:
+            is_new = await redis.set(f"webhook_replay:{webhook_id}", "1", ex=86400, nx=True)
+            if not is_new:
+                logger.info(f"[{client.name}] Shopify duplicate webhook ignored: {webhook_id}")
+                return {"status": "ignored", "detail": "Duplicate webhook delivery"}
+        except Exception as re_exc:
+            logger.warning(f"[{client.name}] Redis Shopify replay check failed: {re_exc}")
+
     logger.info(f"[{client.name}] 📬 Shopify webhook: order #{order_id} ({order_number})")
 
     # ─── Find pending event for this order ────────────────────────────
@@ -410,17 +454,8 @@ async def shopify_webhook(
     def _sha_phone(v: str) -> list[str]:
         if not v:
             return []
-        # Clean non-digits
-        digits = "".join(c for c in v if c.isdigit())
-        if not digits:
-            return []
-        # BD Normalization
-        if len(digits) == 11 and digits.startswith("01"):
-            digits = "88" + digits
-        elif len(digits) == 10 and digits.startswith("1"):
-            digits = "880" + digits
-
-        return [hashlib.sha256(digits.encode("utf-8")).hexdigest()]
+        hashed = hash_phone(v)
+        return [hashed] if hashed else []
 
     user_data = {
         "client_ip_address": body.get("client_ip") or body.get("browser_ip") or "8.8.8.8",

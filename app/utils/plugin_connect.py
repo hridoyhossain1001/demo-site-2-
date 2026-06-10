@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -9,6 +10,13 @@ from fastapi import HTTPException, Request
 
 
 TOKEN_RE = re.compile(r"^[A-Za-z0-9._~-]{16,160}$")
+PUBLIC_GATEWAY_BASE_URL = os.getenv("PUBLIC_GATEWAY_BASE_URL", "").rstrip("/")
+ALLOWED_GATEWAY_HOSTS = {
+    h.strip().lower()
+    for h in os.getenv("ALLOWED_GATEWAY_HOSTS", "").split(",")
+    if h.strip()
+}
+DEV_GATEWAY_HOSTS = {"localhost", "127.0.0.1", "testserver"}
 
 
 def sha256_hex(value: str) -> str:
@@ -84,6 +92,22 @@ def append_query(url: str, params: dict[str, str]) -> str:
 
 
 def gateway_url_from_request(request: Request) -> str:
+    if PUBLIC_GATEWAY_BASE_URL:
+        parsed = urlparse(PUBLIC_GATEWAY_BASE_URL)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise HTTPException(status_code=500, detail="Invalid PUBLIC_GATEWAY_BASE_URL.")
+        return f"{PUBLIC_GATEWAY_BASE_URL}/api/v1"
+
+    raw_host = (request.headers.get("host") or request.url.netloc or "").strip().lower()
+    hostname = raw_host.split(":", 1)[0].rstrip(".")
+    allowed_hosts = ALLOWED_GATEWAY_HOSTS | DEV_GATEWAY_HOSTS
+    if hostname not in allowed_hosts:
+        raise HTTPException(status_code=400, detail="Untrusted or unconfigured gateway host.")
+
     scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("host", request.url.netloc)
-    return f"{scheme}://{host}/api/v1"
+    scheme = str(scheme).split(",", 1)[0].strip().lower()
+    if scheme not in {"http", "https"}:
+        scheme = "https"
+    if scheme != "https" and hostname not in DEV_GATEWAY_HOSTS:
+        scheme = "https"
+    return f"{scheme}://{raw_host}/api/v1"

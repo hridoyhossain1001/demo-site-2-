@@ -61,4 +61,13 @@ async def get_db():
             await session.rollback()
             raise
         finally:
+            try:
+                if session.new or session.dirty or session.deleted:
+                    import logging
+                    logging.getLogger("app.database").warning(
+                        "⚠️ Database session closed with uncommitted changes! "
+                        f"New: {len(session.new)}, Dirty: {len(session.dirty)}, Deleted: {len(session.deleted)}"
+                    )
+            except Exception:
+                pass
             await session.close()

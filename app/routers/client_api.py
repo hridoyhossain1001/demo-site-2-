@@ -32,6 +32,7 @@ from app.routers.client_auth import (
 from app.services.auth_service import hash_password, verify_password
 from app.services.plan_service import (
     apply_expired_trial_downgrade,
+    default_monthly_event_limit,
     effective_plan_tier,
     has_growth_access,
     plan_summary,
@@ -1794,7 +1795,8 @@ async def create_store(
     business_name = _clean_name(payload.business_name, "Business name")
     domain = _clean_domain(payload.domain) if payload.domain else None
 
-    # Create a new Client (store)
+    # Use plan defaults instead of copying a custom parent limit/trial window,
+    # so adding stores cannot multiply account quota.
     new_client = Client(
         name=business_name,
         pixel_id="0",
@@ -1806,12 +1808,12 @@ async def create_store(
         enable_facebook=False,
         enable_tiktok=False,
         enable_ga4=False,
-        monthly_limit=current_client.monthly_limit,
+        monthly_limit=default_monthly_event_limit(tier),
         daily_quota=1000,
         rate_limit=120,
-        plan_tier=current_client.plan_tier,
-        trial_started_at=current_client.trial_started_at,
-        trial_ends_at=current_client.trial_ends_at,
+        plan_tier=tier,
+        trial_started_at=None,
+        trial_ends_at=None,
     )
     db.add(new_client)
     await db.flush()

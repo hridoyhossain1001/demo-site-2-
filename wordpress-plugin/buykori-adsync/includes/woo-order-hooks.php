@@ -18,6 +18,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // ─── 1. Order Status Change → Auto Confirm Deferred Purchase ──────────────────
 add_action( 'woocommerce_order_status_completed', 'buykorigw_on_order_status_change', 20, 1 );
 add_action( 'woocommerce_order_status_processing', 'buykorigw_on_order_status_change', 20, 1 );
+add_action( 'woocommerce_order_status_changed', 'buykorigw_on_order_status_change', 20, 4 );
 add_action( 'woocommerce_order_status_cancelled', 'buykorigw_on_order_cancelled', 20, 1 );
 add_action( 'woocommerce_order_status_failed', 'buykorigw_on_order_cancelled', 20, 1 );
 add_action( 'woocommerce_order_status_refunded', 'buykorigw_on_order_cancelled', 20, 1 );
@@ -76,7 +77,7 @@ function buykorigw_save_attribution_snapshot( $order_or_id ) {
     $wrote_snapshot = false;
 
     // Cookies
-    $cookie_keys = array( '_fbp', '_fbc', '_ttp', '_ttclid', '_ga', '_buykorigw_vid', '_buykorigw_ic_sent', '_buykorigw_ic_event_id' );
+    $cookie_keys = array( '_fbp', '_fbc', '_ttp', '_ttclid', '_ga', '_buykorigw_vid', '_buykorigw_ic_sent', '_buykorigw_ic_event_id', '_buykorigw_bk_platform', '_buykorigw_bk_campaign_id', '_buykorigw_bk_adset_id', '_buykorigw_bk_ad_id' );
     foreach ( $cookie_keys as $key ) {
         $value = isset( $_COOKIE[ $key ] ) ? sanitize_text_field( wp_unslash( $_COOKIE[ $key ] ) ) : '';
         if ( ! empty( $value ) && ! $order->get_meta( '_buykorigw_snapshot' . $key ) ) {
@@ -130,11 +131,7 @@ function buykorigw_save_attribution_snapshot( $order_or_id ) {
         $wrote_snapshot = true;
     }
 
-    if (
-        $wrote_snapshot
-        || $order->get_meta( '_buykorigw_snapshot_fbp' )
-        || $order->get_meta( '_buykorigw_snapshot_buykorigw_vid' )
-    ) {
+    if ( $wrote_snapshot ) {
         $order->update_meta_data( '_buykorigw_snapshot_saved', 1 );
         $order->save();
     }
@@ -328,9 +325,12 @@ function buykorigw_send_order_initiate_checkout_fallback( $order_or_id ) {
         'trigger_reason' => 'order_create_fallback',
     );
 
-    $utm_keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term' );
+    $utm_keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id' );
     foreach ( $utm_keys as $key ) {
         $val = $order->get_meta( '_buykorigw_snapshot_' . $key );
+        if ( ! $val ) {
+            $val = $order->get_meta( '_buykorigw_snapshot__buykorigw_' . $key );
+        }
         if ( $val ) {
             $custom_data[ $key ] = $val;
         }
@@ -357,7 +357,7 @@ function buykorigw_send_order_initiate_checkout_fallback( $order_or_id ) {
     }
 }
 
-function buykorigw_on_order_status_change( $order_id ) {
+function buykorigw_on_order_status_change( $order_id, $old_status = '', $new_status = '', $order_from_hook = null ) {
     $settings = buykorigw_get_settings();
 
     // Only proceed if deferred_purchase is ON
@@ -369,20 +369,22 @@ function buykorigw_on_order_status_change( $order_id ) {
         return;
     }
 
-    // Check which status should trigger the confirm
     $current_action = current_action();
-    $trigger_status = $settings['auto_confirm_status'] ?? 'completed';
-
-    // Match action to expected trigger status
-    if ( $trigger_status === 'completed' && $current_action !== 'woocommerce_order_status_completed' ) {
+    $status_from_action = '';
+    if ( strpos( $current_action, 'woocommerce_order_status_' ) === 0 && $current_action !== 'woocommerce_order_status_changed' ) {
+        $status_from_action = substr( $current_action, strlen( 'woocommerce_order_status_' ) );
+    }
+    $current_status = buykorigw_normalize_order_status_slug( $new_status ?: $status_from_action );
+    if ( empty( $current_status ) ) {
         return;
     }
-    if ( $trigger_status === 'processing' && $current_action !== 'woocommerce_order_status_processing' ) {
+
+    if ( ! in_array( $current_status, buykorigw_get_confirm_statuses( $settings ), true ) ) {
         return;
     }
 
     // Prevent duplicate confirms — use WC_Order for HPOS compatibility
-    $order = wc_get_order( $order_id );
+    $order = is_a( $order_from_hook, 'WC_Order' ) ? $order_from_hook : wc_get_order( $order_id );
     if ( ! $order ) {
         return;
     }
@@ -485,36 +487,6 @@ function buykorigw_on_order_cancelled( $order_id ) {
         return;
     }
 
-    // ─── Otherwise, handle pending deferred purchase cancellation ─────────────
-    if ( ! $settings['deferred_purchase'] ) {
-        return;
-    }
-
-    if ( $order->get_meta( '_buykorigw_confirm_status' ) === 'cancelled' ) {
-        return;
-    }
-
-    $success = buykorigw_cancel_order( $order_id );
-
-    if ( $success ) {
-        $order->update_meta_data( '_buykorigw_confirm_status', 'cancelled' );
-        $order->update_meta_data( '_buykorigw_cancelled_at', current_time( 'mysql' ) );
-        $order->add_order_note( '[Buykori AdSync] Pending Purchase event cancelled. Nothing was sent to ad platforms.' );
-        $order->save();
-
-        if ( $settings['debug_mode'] ) {
-            error_log( "[Buykori AdSync] ✅ Pending Purchase cancelled for order #$order_id." );
-        }
-    } else {
-        buykorigw_schedule_cancel_retry( $order_id );
-        $order->update_meta_data( '_buykorigw_confirm_status', 'cancel_retry_scheduled' );
-        $order->add_order_note( '[Buykori AdSync] Pending Purchase cancel sync failed; retry scheduled.' );
-        $order->save();
-
-        if ( $settings['debug_mode'] ) {
-            error_log( "[Buykori AdSync] ⚠️ Pending Purchase cancel failed for order #$order_id; retry scheduled." );
-        }
-    }
 }
 
 
@@ -917,7 +889,8 @@ function buykorigw_render_order_meta_box( $post_or_order ) {
             echo '<div class="buykorigw-order-warning">Retry in progress (attempt ' . intval( $retry_count ) . '/5)</div>';
         } else {
             echo '<div class="buykorigw-order-info">Pending - waiting for order status change</div>';
-            echo '<div class="buykorigw-order-muted buykorigw-order-note">Auto-confirm on: <strong>' . esc_html( ucfirst( $settings['auto_confirm_status'] ) ) . '</strong></div>';
+            $confirm_status_labels = array_map( 'ucfirst', buykorigw_get_confirm_statuses( $settings ) );
+            echo '<div class="buykorigw-order-muted buykorigw-order-note">Auto-confirm on: <strong>' . esc_html( implode( ', ', $confirm_status_labels ) ) . '</strong></div>';
         }
     }
 
@@ -992,9 +965,12 @@ function buykorigw_send_refund_event( $order ) {
         'trigger_reason' => 'order_refund_hook',
     );
 
-    $utm_keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term' );
+    $utm_keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id' );
     foreach ( $utm_keys as $key ) {
         $val = $order->get_meta( '_buykorigw_snapshot_' . $key );
+        if ( ! $val ) {
+            $val = $order->get_meta( '_buykorigw_snapshot__buykorigw_' . $key );
+        }
         if ( $val ) {
             $custom_data[ $key ] = $val;
         }

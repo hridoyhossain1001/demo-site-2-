@@ -5,7 +5,7 @@ Tracker SDK Generator — ডায়নামিক JavaScript ট্র্য
 import re
 
 
-def generate_tracker_js(api_key: str, gateway_origin: str) -> str:
+def generate_tracker_js(api_key: str, gateway_origin: str, ingest_token: str = "") -> str:
     # Strict regex validation for api_key to prevent injection
     if not api_key or not re.match(r"^[a-zA-Z0-9_\-]+$", api_key):
         raise ValueError("Invalid API Key format")
@@ -33,6 +33,7 @@ def generate_tracker_js(api_key: str, gateway_origin: str) -> str:
 
 var K="{api_key}";
 var E="{gateway_origin}/c";
+var T="{ingest_token}";
 var U={{}};  // user identity store
 var Q=[];   // event queue (before DOM ready)
 var R=false; // ready flag
@@ -184,7 +185,7 @@ function send(eventName, customData, userData, eventId){{
     // Prefer sendBeacon (works even on page unload)
     if(navigator.sendBeacon){{
       var blob=new Blob([body],{{type:'application/json'}});
-      var ok=navigator.sendBeacon(E+'?key='+K,blob);
+      var ok=navigator.sendBeacon(E+'?key='+K+(T?'&token='+encodeURIComponent(T):''),blob);
       if(ok)debug('Queued with sendBeacon',evt.event_id);
       else fallbackFetch(body,evt);
     }}else{{
@@ -197,7 +198,7 @@ function send(eventName, customData, userData, eventId){{
 }}
 
 function fallbackFetch(body,evt){{
-  fetch(E+'?key='+K,{{
+  fetch(E+'?key='+K+(T?'&token='+encodeURIComponent(T):''),{{
     method:'POST',
     headers:{{'Content-Type':'application/json'}},
     body:body,

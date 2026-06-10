@@ -458,7 +458,7 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     # সঠিকভাবে respond না করলে webhook save হয় না।
     event_type = payload.get("event") or payload.get("type") or ""
     received_sig = request.headers.get("x-pathao-signature") or request.headers.get("x-signature") or ""
-    integration_response_secret = PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET or received_sig
+    integration_response_secret = PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET
 
     def pathao_response(content: dict, *, status_code: int = 200, secret: str | None = None) -> JSONResponse:
         response = JSONResponse(status_code=status_code, content=content)
@@ -467,12 +467,14 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         return response
 
     if event_type == "webhook_integration":
-        if not received_sig:
-            raise HTTPException(status_code=400, detail="Missing Pathao integration secret")
+        if not PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET:
+            raise HTTPException(status_code=500, detail="Pathao integration secret not configured")
+        if not received_sig or not hmac.compare_digest(received_sig, PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET):
+            raise HTTPException(status_code=401, detail="Invalid Pathao integration signature")
         logger.info("Pathao webhook_integration handshake received — sending verification response")
         # Pathao expects us to echo back the secret in the response header
         return pathao_response(
-            secret=integration_response_secret,
+            secret=PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET,
             status_code=202,
             content={"status": "verified", "message": "Webhook integration verified"}
         )

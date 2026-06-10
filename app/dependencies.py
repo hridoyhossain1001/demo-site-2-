@@ -232,13 +232,28 @@ async def get_current_client(
                 )
 
     # ─── Cache miss — DB query ─────────────────────────────────────────
+    from sqlalchemy import or_
     result = await db.execute(
         select(Client).where(
-            Client.api_key == x_api_key,
             Client.is_active == True
+        ).where(
+            or_(Client.api_key == x_api_key, Client.old_api_key == x_api_key)
         )
     )
-    client = result.scalar_one_or_none()
+    clients = result.scalars().all()
+    client = None
+
+    for c in clients:
+        if c.api_key == x_api_key:
+            client = c
+            break
+        elif c.old_api_key == x_api_key and c.api_key_rotated_at:
+            from datetime import timezone
+            rotated_at = c.api_key_rotated_at if c.api_key_rotated_at.tzinfo else c.api_key_rotated_at.replace(tzinfo=timezone.utc)
+            current_time = datetime.now(timezone.utc)
+            if (current_time - rotated_at).total_seconds() <= 900:  # 15 minutes grace period
+                client = c
+                break
 
     if not client:
         raise HTTPException(

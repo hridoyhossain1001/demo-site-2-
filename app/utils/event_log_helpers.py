@@ -109,6 +109,11 @@ def build_event_log_kwargs(
             value = None
 
     campaign_source = custom_data.get("campaign_source") or utm_source
+    ad_platform = custom_data.get("ad_platform") or custom_data.get("bk_platform")
+    ad_campaign_id = custom_data.get("ad_campaign_id") or custom_data.get("bk_campaign_id")
+    ad_adset_id = custom_data.get("ad_adset_id") or custom_data.get("bk_adset_id")
+    ad_id = custom_data.get("ad_id") or custom_data.get("bk_ad_id")
+
     return {
         "client_id": client_id,
         "event_name": event_data.get("event_name") or "unknown",
@@ -128,6 +133,10 @@ def build_event_log_kwargs(
         "utm_campaign": custom_data.get("utm_campaign"),
         "utm_content": custom_data.get("utm_content"),
         "utm_term": custom_data.get("utm_term"),
+        "ad_platform": ad_platform,
+        "ad_campaign_id": ad_campaign_id,
+        "ad_adset_id": ad_adset_id,
+        "ad_id": ad_id,
         **event_signal_flags(event_data),
         **extra,
     }

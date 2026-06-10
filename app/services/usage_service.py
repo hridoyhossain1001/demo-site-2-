@@ -20,11 +20,14 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
+
 
 from app.database import engine
 from app.models.usage_counter import UsageCounter
-from app.services.redis_pool import get_redis
+from app.models.client_user import ClientUser
+from app.models.client import Client
+from app.services.redis_pool import get_redis, record_redis_fallback
 
 logger = logging.getLogger(__name__)
 USAGE_DB_SYNC_IN_REQUEST = os.getenv(
@@ -63,6 +66,7 @@ async def check_rate_limit_only(client, incoming_event_count: int) -> None:
         raise
     except Exception as exc:
         logger.warning(f"[{client.name}] Redis rate-limit check failed: {exc}")
+        record_redis_fallback("rate_limit")
 
 
 async def _atomic_reserve(
@@ -152,7 +156,36 @@ async def _rollback_redis_counters(client, reserved_keys: dict[str, int]) -> boo
         return True
     except Exception as exc:
         logger.warning(f"[{client.name}] Redis usage rollback failed: {exc}")
+        record_redis_fallback("usage_rollback")
         return False
+
+
+async def get_shared_billing_client_ids(db: AsyncSession, client_id: int) -> list[int]:
+    if not hasattr(db, "execute"):
+        return [client_id]
+
+    # 1. Get emails of active owner users for this client_id
+    emails_query = select(ClientUser.email).where(
+        ClientUser.client_id == client_id,
+        ClientUser.role == "owner",
+        ClientUser.is_active == True,
+    )
+    emails_res = await db.execute(emails_query)
+    emails = [row[0] for row in emails_res.all() if row[0]]
+    if not emails:
+        return [client_id]
+
+    # 2. Get client_ids of all active owner users sharing any of those emails
+    shared_query = select(ClientUser.client_id).where(
+        ClientUser.email.in_(emails),
+        ClientUser.role == "owner",
+        ClientUser.is_active == True,
+    )
+    shared_res = await db.execute(shared_query)
+    client_ids = list({row[0] for row in shared_res.all() if row[0]})
+    if client_id not in client_ids:
+        client_ids.append(client_id)
+    return client_ids
 
 
 async def check_and_reserve_usage(
@@ -170,6 +203,7 @@ async def check_and_reserve_usage(
 
     Returns: dict of {window_key: event_count} — rollback-এ ব্যবহার হবে
     """
+    shared_client_ids = await get_shared_billing_client_ids(db, client.id)
     now = datetime.now(timezone.utc)
     rate_limit = getattr(client, "rate_limit", None) or 5000
     reserved_keys: dict[str, int] = {}
@@ -200,10 +234,22 @@ async def check_and_reserve_usage(
 
             daily_quota = getattr(client, "daily_quota", None)
             monthly_limit = getattr(client, "monthly_limit", None)
+
+            other_client_ids = [cid for cid in shared_client_ids if cid != client.id]
+            other_monthly_counts = 0
+            if other_client_ids and monthly_limit and monthly_limit > 0:
+                pipe_other = r.pipeline()
+                for cid in other_client_ids:
+                    pipe_other.get(f"usage:{cid}:{monthly_key}")
+                other_results = await pipe_other.execute()
+                for val in other_results:
+                    if val is not None:
+                        other_monthly_counts += int(val)
+
             if (
                 counts.get(minute_key, 0) > rate_limit
                 or (daily_quota and counts.get(daily_key, 0) > daily_quota)
-                or (monthly_limit and counts.get(monthly_key, 0) > monthly_limit)
+                or (monthly_limit and (counts.get(monthly_key, 0) + other_monthly_counts) > monthly_limit)
             ):
                 pipe = r.pipeline()
                 for window_key, event_count in reservations:
@@ -222,6 +268,7 @@ async def check_and_reserve_usage(
             raise
         except Exception as exc:
             logger.warning(f"[{client.name}] Redis usage reserve failed, falling back to DB: {exc}")
+            record_redis_fallback("usage_reserve")
 
     # ─── Per-Minute Rate Limit ─────────────────────────────────────────
     minute_key = f"rate:{now.strftime('%Y-%m-%dT%H:%M')}"
@@ -266,6 +313,15 @@ async def check_and_reserve_usage(
         monthly_key = f"monthly:{now.strftime('%Y-%m')}"
         new_monthly = await _atomic_reserve(db, client.id, monthly_key, incoming_event_count)
         reserved_keys[monthly_key] = incoming_event_count
+
+        other_client_ids = [cid for cid in shared_client_ids if cid != client.id]
+        if other_client_ids:
+            other_stmt = select(func.sum(UsageCounter.count)).where(
+                UsageCounter.client_id.in_(other_client_ids),
+                UsageCounter.window_key == monthly_key,
+            )
+            other_res = await db.execute(other_stmt)
+            new_monthly += (other_res.scalar() or 0)
 
         if new_monthly > monthly_limit:
             # Undo inside the current transaction; caller owns commit/rollback.
@@ -320,6 +376,7 @@ async def rollback_usage_reservation(
                     return
             except Exception as exc:
                 logger.warning(f"[{client.name}] Redis usage rollback failed, falling back to DB: {exc}")
+                record_redis_fallback("usage_rollback")
         # Redis unavailable — fall through to DB rollback as best-effort
 
     # We do NOT commit inside the helper, we just apply modifications.
@@ -344,6 +401,7 @@ async def check_usage_limits_db(
     ⚠️ Legacy: এই function-এ race condition আছে (read-then-check gap)।
     নতুন কোডে check_and_reserve_usage() ব্যবহার করুন।
     """
+    shared_client_ids = await get_shared_billing_client_ids(db, client.id)
     now = datetime.now(timezone.utc)
     rate_limit = client.rate_limit or 5000
 
@@ -385,9 +443,16 @@ async def check_usage_limits_db(
     monthly_limit = getattr(client, "monthly_limit", None)
     if monthly_limit and monthly_limit > 0:
         monthly_key = f"monthly:{now.strftime('%Y-%m')}"
+
+        # Sum of monthly limits of all shared client IDs
+        limit_stmt = select(func.sum(Client.monthly_limit)).where(Client.id.in_(shared_client_ids))
+        limit_res = await db.execute(limit_stmt)
+        monthly_limit = limit_res.scalar() or 0
+
+        # Sum of monthly counters of all shared client IDs
         monthly_result = await db.execute(
-            select(UsageCounter.count).where(
-                UsageCounter.client_id == client.id,
+            select(func.sum(UsageCounter.count)).where(
+                UsageCounter.client_id.in_(shared_client_ids),
                 UsageCounter.window_key == monthly_key,
             )
         )

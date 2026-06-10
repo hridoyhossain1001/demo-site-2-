@@ -224,15 +224,60 @@ function buykorigw_inject_tracker() {
         $tracker_data['search_string'] = get_search_query();
     }
 
+    if (
+        $is_thankyou
+        && ! empty( $settings['enable_purchase'] )
+        && empty( $settings['deferred_purchase'] )
+        && ! empty( $settings['enable_hybrid'] )
+        && function_exists( 'wc_get_order' )
+    ) {
+        $order_id = absint( get_query_var( 'order-received' ) );
+        $order = $order_id ? wc_get_order( $order_id ) : false;
+        if ( $order && is_a( $order, 'WC_Order' ) ) {
+            $content_ids = array();
+            $contents = array();
+            $num_items = 0;
+            if ( function_exists( 'buykorigw_order_contents_payload' ) ) {
+                list( $content_ids, $contents, $num_items ) = buykorigw_order_contents_payload( $order );
+            } else {
+                foreach ( $order->get_items() as $item ) {
+                    $product_id = $item->get_product_id();
+                    if ( ! $product_id ) {
+                        continue;
+                    }
+                    $quantity = max( 1, (int) $item->get_quantity() );
+                    $content_id = (string) $product_id;
+                    $content_ids[] = $content_id;
+                    $contents[] = array(
+                        'id'           => $content_id,
+                        'content_id'   => $content_id,
+                        'content_type' => 'product',
+                        'content_name' => $item->get_name(),
+                        'quantity'     => $quantity,
+                        'item_price'   => (float) ( $item->get_total() / $quantity ),
+                    );
+                    $num_items += $quantity;
+                }
+            }
+
+            if ( ! empty( $content_ids ) || ! empty( $contents ) ) {
+                $tracker_data['purchase'] = array(
+                    'event_id'     => 'wc_purchase_' . $order_id,
+                    'order_id'     => (string) $order_id,
+                    'value'        => (float) $order->get_total(),
+                    'currency'     => $order->get_currency(),
+                    'content_ids'  => array_values( array_unique( $content_ids ) ),
+                    'contents'     => $contents,
+                    'content_type' => 'product',
+                    'num_items'    => $num_items,
+                );
+            }
+        }
+    }
+
     // Reuse an already-loaded cart on landing pages as well. Embedded checkout
     // builders frequently preload it without making is_checkout() true.
     $has_loaded_cart = function_exists( 'WC' ) && WC() && WC()->cart && ! WC()->cart->is_empty();
-    if ( function_exists( 'buykorigw_get_cart_event_data' ) && ( $is_cart || $is_checkout || $has_loaded_cart ) ) {
-        $cart_data = buykorigw_get_cart_event_data();
-        if ( ! empty( $cart_data ) ) {
-            $tracker_data['cart'] = $cart_data;
-        }
-    }
 
     if (
         ! $low_resource_mode
@@ -429,7 +474,7 @@ function buykorigw_ajax_track_event() {
 
 
 function buykorigw_add_marketing_params( $custom_data ) {
-    $keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_source' );
+    $keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_source', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id' );
     foreach ( $keys as $key ) {
         if ( empty( $custom_data[ $key ] ) && ! empty( $_COOKIE[ '_buykorigw_' . $key ] ) ) {
             $custom_data[ $key ] = buykorigw_normalize_campaign_value( $key, sanitize_text_field( wp_unslash( $_COOKIE[ '_buykorigw_' . $key ] ) ) );
@@ -795,9 +840,12 @@ function buykorigw_track_purchase( $order_id ) {
     }
 
     // Add UTM params from snapshot
-    $utm_keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term' );
+    $utm_keys = array( 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id' );
     foreach ( $utm_keys as $key ) {
         $val = $order->get_meta( '_buykorigw_snapshot_' . $key );
+        if ( ! $val ) {
+            $val = $order->get_meta( '_buykorigw_snapshot__buykorigw_' . $key );
+        }
         if ( $val ) {
             $event_payload['custom_data'][ $key ] = $val;
         }

@@ -12,6 +12,15 @@ FACEBOOK_API_VERSION = os.getenv("FACEBOOK_API_VERSION", "v21.0")
 HTTP_MAX_CONNECTIONS = int(os.getenv("HTTP_MAX_CONNECTIONS", "20"))
 HTTP_MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("HTTP_MAX_KEEPALIVE_CONNECTIONS", "10"))
 HTTP_TIMEOUT_SECONDS = float(os.getenv("HTTP_TIMEOUT_SECONDS", "15.0"))
+INTERNAL_ONLY_FIELDS = (
+    "emq_score",
+    "raw_order_data",
+    "fraud_score",
+    "velocity_flag",
+    "internal_notes",
+    "_enriched",
+    "_ldu",
+)
 
 # ─── Global Persistent HTTP Client ─────────────────────────────────────────
 # TCP connection reuse + HTTP/2 multiplexing = 3-5x faster Facebook API calls
@@ -47,6 +56,21 @@ async def close_http_client():
         logger.info("🔒 HTTP client বন্ধ হয়েছে।")
 
 
+def scrub_internal_event_fields(event_payload: dict) -> dict:
+    """Remove Buykori-only fields before sending an event to third-party APIs."""
+    for field in INTERNAL_ONLY_FIELDS:
+        event_payload.pop(field, None)
+
+    custom_data = event_payload.get("custom_data")
+    if isinstance(custom_data, dict):
+        for field in INTERNAL_ONLY_FIELDS:
+            custom_data.pop(field, None)
+        if not custom_data:
+            event_payload.pop("custom_data", None)
+
+    return event_payload
+
+
 async def send_to_facebook(client, events: List[EventData]) -> dict:
     """
     ক্লায়েন্টের Pixel ID ও Access Token ব্যবহার করে
@@ -63,8 +87,12 @@ async def send_to_facebook(client, events: List[EventData]) -> dict:
 
     # ইভেন্ট ডাটা প্রস্তুত করা
     events_data = [event.model_dump(exclude_none=True) for event in events]
+    ldu_requested = any(
+        isinstance(event.get("custom_data"), dict) and event["custom_data"].get("_ldu")
+        for event in events_data
+    )
     for e in events_data:
-        e.pop("emq_score", None)
+        scrub_internal_event_fields(e)
 
     payload = {
         "data": events_data,
@@ -72,6 +100,11 @@ async def send_to_facebook(client, events: List[EventData]) -> dict:
     }
 
     # Test Event Code থাকলে যোগ করো (FB Events Manager-এ টেস্ট করার সময়)
+    if getattr(client, "enable_ldu", False) or ldu_requested:
+        payload["data_processing_options"] = ["LDU"]
+        payload["data_processing_options_country"] = 0
+        payload["data_processing_options_state"] = 0
+
     if client.test_event_code:
         payload["test_event_code"] = client.test_event_code
 

@@ -3,6 +3,8 @@ import hmac
 import os
 from datetime import datetime, timezone
 
+import pytest
+
 os.environ.setdefault(
     "ADMIN_PASSWORD",
     "pbkdf2_sha256$210000$dGVzdC1hZG1pbi1zYWx0LTE=$9gwSQUsI_uzxaNpdvx_cOcpF4opgO7Ma_Hcmq3z4kSU=",
@@ -205,6 +207,159 @@ def test_plugin_update_signature_contract():
         signature,
         hmac.new(api_key.encode(), payload.encode(), hashlib.sha256).hexdigest(),
     )
+
+
+def test_gateway_url_rejects_untrusted_host(monkeypatch):
+    from app.routers import plugin
+
+    monkeypatch.setattr(plugin, "PUBLIC_GATEWAY_BASE_URL", "")
+    monkeypatch.setattr(plugin, "ALLOWED_GATEWAY_HOSTS", {"api.buykori.app"})
+    request = _security_request(headers=[(b"host", b"evil.test")])
+
+    try:
+        plugin._build_gateway_url(request)
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+    else:
+        raise AssertionError("Untrusted Host header was accepted")
+
+
+def test_gateway_url_prefers_configured_public_base(monkeypatch):
+    from app.routers import plugin
+
+    monkeypatch.setattr(plugin, "PUBLIC_GATEWAY_BASE_URL", "https://gw.buykori.com")
+    request = _security_request(headers=[(b"host", b"evil.test")])
+
+    assert plugin._build_gateway_url(request) == "https://gw.buykori.com/api/v1"
+
+
+def test_capi_scrub_removes_internal_fields_from_root_and_custom_data():
+    from app.services.capi_service import scrub_internal_event_fields
+
+    payload = {
+        "event_name": "Purchase",
+        "emq_score": 8.2,
+        "raw_order_data": {"customer": "private"},
+        "custom_data": {
+            "value": 1200,
+            "raw_order_data": {"line_items": []},
+            "fraud_score": 90,
+        },
+    }
+
+    scrub_internal_event_fields(payload)
+
+    assert "emq_score" not in payload
+    assert "raw_order_data" not in payload
+    assert "raw_order_data" not in payload["custom_data"]
+    assert "fraud_score" not in payload["custom_data"]
+
+
+def test_capi_scrub_removes_empty_custom_data_after_internal_fields():
+    from app.services.capi_service import scrub_internal_event_fields
+
+    payload = {"event_name": "PageView", "custom_data": {"_enriched": True}}
+
+    scrub_internal_event_fields(payload)
+
+    assert "custom_data" not in payload
+
+
+def test_auto_event_id_is_stable_without_time_bucket():
+    from app.schemas.event import CustomData, EventData, UserData
+    from app.services.event_quality import boost_event_quality
+
+    first = EventData(
+        event_name="InitiateCheckout",
+        event_time=1710000000,
+        event_source_url="https://shop.example/checkout",
+        user_data=UserData(external_id=["visitor-1"]),
+        custom_data=CustomData(content_ids=["sku-1"], value=500),
+    )
+    second = first.model_copy(deep=True)
+    second.event_time = first.event_time + 31
+
+    boost_event_quality(first)
+    boost_event_quality(second)
+
+    assert first.event_id == second.event_id
+    assert first.event_id.startswith("bk_initiatecheckout_")
+
+
+def test_emq_score_excludes_server_injected_ip_and_user_agent_by_default():
+    from app.schemas.event import EventData, UserData
+    from app.services.event_quality import calculate_emq_score
+
+    event = EventData(
+        event_name="PageView",
+        event_time=1710000000,
+        user_data=UserData(
+            client_ip_address="203.0.113.10",
+            client_user_agent="Mozilla/5.0",
+        ),
+    )
+
+    assert calculate_emq_score(event) == 0.0
+    assert calculate_emq_score(event, customer_provided_only=False) == 1.0
+
+
+def test_bot_classifier_marks_short_user_agent_with_cookie_as_suspicious():
+    from app.services.bot_detector import classify_traffic, is_bot
+
+    assert classify_traffic("", has_cookie=True) == "suspicious"
+    assert classify_traffic("", has_cookie=False) == "bot"
+    assert is_bot("Googlebot/2.1") is True
+
+
+def test_tracker_ingest_token_round_trip_and_tamper_reject():
+    from types import SimpleNamespace
+
+    from app.routers.tracker import _issue_tracker_ingest_token, _verify_tracker_ingest_token
+
+    client = SimpleNamespace(id=1, api_key="private-api-key")
+    token = _issue_tracker_ingest_token(client, "public-key")
+
+    assert _verify_tracker_ingest_token(client, "public-key", token)
+    assert not _verify_tracker_ingest_token(client, "other-public-key", token)
+    assert not _verify_tracker_ingest_token(client, "public-key", token + "x")
+
+
+def test_identity_phone_hash_matches_event_schema_phone_hash():
+    from app.schemas.event import UserData
+    from app.services.identity import hash_phone
+
+    hashed = hash_phone("01837-224409")
+
+    assert UserData(ph=["+8801837224409"]).ph == [hashed]
+
+
+def test_shopify_plaintext_secret_fallback_is_disabled_by_default(monkeypatch):
+    from app.routers import webhook
+
+    monkeypatch.setattr(webhook, "ALLOW_SHOPIFY_PLAINTEXT_SHARED_SECRET", False)
+
+    assert not webhook._verify_shopify_signature(b"{}", "bad", "plaintext-secret")
+
+
+@pytest.mark.anyio
+async def test_geoip_missing_db_does_not_use_fallback_mirror_without_opt_in(tmp_path, monkeypatch):
+    from app.services import geoip_service
+
+    called = False
+
+    async def fake_fallback(_tmp_path):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(geoip_service, "DB_PATH", str(tmp_path / "missing.mmdb"))
+    monkeypatch.setattr(geoip_service, "MAXMIND_ACCOUNT_ID", "")
+    monkeypatch.setattr(geoip_service, "MAXMIND_LICENSE_KEY", "")
+    monkeypatch.setattr(geoip_service, "ALLOW_GEOIP_FALLBACK_MIRROR", False)
+    monkeypatch.setattr(geoip_service, "_download_fallback_geoip_db", fake_fallback)
+
+    await geoip_service.download_geoip_db_if_missing()
+
+    assert called is False
 
 
 def test_domain_normalization():

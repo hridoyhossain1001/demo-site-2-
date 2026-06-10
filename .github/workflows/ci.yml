@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:///./ci.db
+      ADMIN_API_KEY: test-admin-api-key
+      ADMIN_PASSWORD: pbkdf2_sha256$210000$dGVzdC1hZG1pbi1zYWx0LTE=$9gwSQUsI_uzxaNpdvx_cOcpF4opgO7Ma_Hcmq3z4kSU=
+      ENCRYPTION_KEY: ZFhnf1szwemka8kBbH9jPTC7oKBRTEv0EqWt1J8AD0M=
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Check Alembic has one head
+        run: test "$(python -m alembic heads | wc -l)" -eq 1
+      - name: Run tests
+        run: python -m pytest

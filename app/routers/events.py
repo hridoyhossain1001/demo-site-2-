@@ -365,6 +365,12 @@ async def receive_events(
             status_code=413,
             detail=f"Too many events in one request. Max {MAX_EVENTS_PER_REQUEST}.",
         )
+    version_header = request.headers.get("x-buykori-version")
+    if version_header:
+        logger.info(f"[{client.name}] Request received from plugin version: {version_header}")
+    else:
+        logger.debug(f"[{client.name}] Request received without X-Buykori-Version header")
+
     client_ip = _request_client_ip(request)
     site_host_for_binding = request.headers.get("x-capi-origin", "") or ""
     # ─── Domain Whitelisting (API Key চুরি প্রতিরোধ) ─────────────────

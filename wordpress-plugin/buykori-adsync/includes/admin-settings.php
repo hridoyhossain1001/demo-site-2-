@@ -101,7 +101,9 @@ function buykorigw_sanitize_settings( $input ) {
     $sanitized['connected_at']          = sanitize_text_field( $input['connected_at'] ?? ( $existing['connected_at'] ?? '' ) );
     $sanitized['connect_warning']       = sanitize_text_field( $input['connect_warning'] ?? ( $existing['connect_warning'] ?? '' ) );
     $sanitized['installation_id']       = sanitize_text_field( $input['installation_id'] ?? ( $existing['installation_id'] ?? buykorigw_get_installation_id() ) );
-    $sanitized['low_resource_mode']  = 0;
+    $sanitized['low_resource_mode']  = isset( $input['low_resource_mode'] )
+        ? ( '1' === (string) $input['low_resource_mode'] ? 1 : 0 )
+        : (int) ( $existing['low_resource_mode'] ?? 0 );
     // Core Events
     $sanitized['enable_pageview']       = isset( $input['enable_pageview'] ) ? 1 : 0;
     $sanitized['enable_lead']           = isset( $input['enable_lead'] ) ? 1 : 0;
@@ -114,15 +116,29 @@ function buykorigw_sanitize_settings( $input ) {
     $sanitized['enable_checkout']       = isset( $input['enable_checkout'] ) ? 1 : 0;
     $sanitized['enable_addpaymentinfo'] = isset( $input['enable_addpaymentinfo'] ) ? 1 : 0;
     $sanitized['enable_purchase']       = isset( $input['enable_purchase'] ) ? 1 : 0;
-    $sanitized['tracking_mode']      = 'auto';
+    $tracking_mode = sanitize_text_field( $input['tracking_mode'] ?? ( $existing['tracking_mode'] ?? 'auto' ) );
+    $sanitized['tracking_mode']      = in_array( $tracking_mode, array( 'auto', 'standard', 'one_page' ), true ) ? $tracking_mode : 'auto';
     $sanitized['deferred_purchase']  = isset( $input['deferred_purchase'] ) ? 1 : 0;
-    $sanitized['auto_confirm_status']= sanitize_text_field( $input['auto_confirm_status'] ?? 'completed' );
+    $confirm_statuses = array();
+    if ( isset( $input['auto_confirm_statuses'] ) && is_array( $input['auto_confirm_statuses'] ) ) {
+        $confirm_statuses = array_map( 'buykorigw_normalize_order_status_slug', $input['auto_confirm_statuses'] );
+    } elseif ( isset( $input['auto_confirm_status'] ) ) {
+        $confirm_statuses = array( buykorigw_normalize_order_status_slug( $input['auto_confirm_status'] ) );
+    }
+    $confirm_statuses = array_values( array_unique( array_filter( $confirm_statuses ) ) );
+    if ( empty( $confirm_statuses ) ) {
+        $confirm_statuses = buykorigw_get_confirm_statuses( $existing );
+    }
+    $sanitized['auto_confirm_statuses'] = $confirm_statuses;
+    $sanitized['auto_confirm_status'] = $confirm_statuses[0];
     $sanitized['debug_mode']         = isset( $input['debug_mode'] ) ? 1 : 0;
     $content_id_format = sanitize_text_field( $input['content_id_format'] ?? 'id' );
     $sanitized['content_id_format']  = in_array( $content_id_format, array( 'id', 'sku' ), true ) ? $content_id_format : 'id';
     $sanitized['enable_hybrid']      = isset( $input['enable_hybrid'] ) ? 1 : 0;
     $sanitized['enable_tiktok_pageview'] = isset( $input['enable_tiktok_pageview'] ) ? 1 : 0;
-    $sanitized['enable_variations']  = 1;
+    $sanitized['enable_variations']  = isset( $input['enable_variations'] )
+        ? ( '1' === (string) $input['enable_variations'] ? 1 : 0 )
+        : (int) ( $existing['enable_variations'] ?? 1 );
     $sanitized['fb_pixel_id']        = sanitize_text_field( trim( $input['fb_pixel_id'] ?? '' ) );
     $sanitized['tt_pixel_id']        = sanitize_text_field( trim( $input['tt_pixel_id'] ?? '' ) );
     return $sanitized;
@@ -418,7 +434,7 @@ function buykorigw_settings_page() {
             <?php settings_fields( 'buykorigw_settings_group' ); ?>
             <input type="hidden" name="<?php echo BUYKORIGW_OPTION_KEY; ?>[low_resource_mode]" value="0">
             <input type="hidden" name="<?php echo BUYKORIGW_OPTION_KEY; ?>[tracking_mode]" value="auto">
-            <input type="hidden" name="<?php echo BUYKORIGW_OPTION_KEY; ?>[enable_variations]" value="1">
+            <input type="hidden" name="<?php echo BUYKORIGW_OPTION_KEY; ?>[enable_variations]" value="0">
 
             <!-- Header with Sticky Save Button -->
             <div class="buykorigw-header">
@@ -648,6 +664,11 @@ function buykorigw_settings_page() {
                     </div>
                     <?php if ( ! empty( $settings['enable_hybrid'] ) && ( ! empty( $settings['fb_pixel_id'] ) || ! empty( $settings['tt_pixel_id'] ) ) ) : ?>
                     <div class="buykorigw-warning-box" style="margin-top:12px;">
+                        <strong>Hybrid mode warning:</strong> Disable the Purchase event in other pixel plugins
+                        such as PixelYourSite or the official Meta/TikTok plugin. If another plugin sends Purchase
+                        with a different event ID, ad platforms can count duplicate conversions.
+                    </div>
+                    <div class="buykorigw-warning-box" style="margin-top:12px;">
                         <strong>Multi-store catalog notice:</strong> If the same Pixel ID is used across multiple stores,
                         every store should send product IDs that match the connected Meta/TikTok catalog feed.
                         For shared catalogs, prefer globally unique SKUs or store-prefixed catalog IDs. Using different
@@ -774,13 +795,38 @@ function buykorigw_settings_page() {
                     </div>
 
                     <div class="buykorigw-field">
-                        <label for="buykorigw_auto_confirm">Confirmed order status</label>
-                        <select id="buykorigw_auto_confirm"
-                                name="<?php echo BUYKORIGW_OPTION_KEY; ?>[auto_confirm_status]">
-                            <option value="processing" <?php selected( $settings['auto_confirm_status'], 'processing' ); ?>>Processing</option>
-                            <option value="completed" <?php selected( $settings['auto_confirm_status'], 'completed' ); ?>>Completed</option>
+                        <label for="buykorigw_auto_confirm_statuses">Confirmed order statuses</label>
+                        <?php
+                        $selected_confirm_statuses = buykorigw_get_confirm_statuses( $settings );
+                        $order_statuses = function_exists( 'wc_get_order_statuses' )
+                            ? wc_get_order_statuses()
+                            : array(
+                                'wc-processing' => 'Processing',
+                                'wc-completed'  => 'Completed',
+                            );
+                        ?>
+                        <select id="buykorigw_auto_confirm_statuses"
+                                class="buykorigw-multi-select"
+                                name="<?php echo BUYKORIGW_OPTION_KEY; ?>[auto_confirm_statuses][]"
+                                multiple
+                                size="<?php echo esc_attr( min( 8, max( 3, count( $order_statuses ) ) ) ); ?>">
+                            <?php foreach ( $order_statuses as $status_key => $status_label ) :
+                                $status_slug = buykorigw_normalize_order_status_slug( $status_key );
+                                ?>
+                                <option value="<?php echo esc_attr( $status_slug ); ?>" <?php selected( in_array( $status_slug, $selected_confirm_statuses, true ) ); ?>>
+                                    <?php echo esc_html( $status_label ); ?>
+                                </option>
+                            <?php endforeach; ?>
+                            <?php
+                            $known_status_slugs = array_map( 'buykorigw_normalize_order_status_slug', array_keys( $order_statuses ) );
+                            foreach ( array_diff( $selected_confirm_statuses, $known_status_slugs ) as $missing_status ) :
+                                ?>
+                                <option value="<?php echo esc_attr( $missing_status ); ?>" selected>
+                                    <?php echo esc_html( ucfirst( str_replace( '-', ' ', $missing_status ) ) ); ?>
+                                </option>
+                            <?php endforeach; ?>
                         </select>
-                        <p class="description">Purchase will be sent when the order reaches this WooCommerce status.</p>
+                        <p class="description">Purchase will be confirmed when the order reaches any selected status. Select custom COD statuses such as Confirmed if your store uses them.</p>
                     </div>
                 </div>
 

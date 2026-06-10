@@ -473,6 +473,22 @@
         if (id) cartSnapshot[id] = parseInt(item.quantity || 0, 10);
     });
 
+    function initCartSnapshot() {
+        if (!cfg.store_cart_url || !window.fetch) return;
+        fetch(cfg.store_cart_url, { credentials: 'same-origin' })
+            .then(function(response) { return response.ok ? response.json() : null; })
+            .then(function(cart) {
+                if (!cart || !Array.isArray(cart.items)) return;
+                cart.items.forEach(function(item) {
+                    var data = storeCartItemData(item);
+                    if (!data) return;
+                    var quantity = parseInt(item.quantity || 0, 10);
+                    cartSnapshot[data.id] = quantity;
+                });
+            }).catch(function() {});
+    }
+    initCartSnapshot();
+
     function storeCartItemData(item) {
         if (!item) return null;
         var rawId = String(item.variation && item.variation.length && item.id ? item.id : (item.id || ''));
@@ -1191,7 +1207,7 @@
     }
 
     function persistMarketingParams() {
-        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_source'];
+        var keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_source', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id'];
         keys.forEach(function(key) {
             var value = normalizeCampaignValue(key, getQueryParam(key));
             if (value) {
@@ -1203,7 +1219,7 @@
     // ─── UTM attributions fallback based on Click ID if UTM is absent ─────
     function getMarketingParams() {
         var out = {};
-        ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_source'].forEach(function(key) {
+        ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'campaign_source', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id'].forEach(function(key) {
             out[key] = normalizeCampaignValue(key, getQueryParam(key) || getCookie('_buykorigw_' + key) || '');
         });
 
@@ -1262,6 +1278,24 @@
     }
 
     // ─── 2. ViewContent (Product Page) ─────────────────────────────────
+    // Browser Purchase exists only for hybrid deduplication. It intentionally
+    // does not call sendEvent(), because the server-side Purchase is already
+    // queued by WooCommerce with the same wc_purchase_{order_id} event ID.
+    if (cfg.events && cfg.events.purchase && cfg.purchase && cfg.purchase.event_id) {
+        var browserPurchaseId = String(cfg.purchase.event_id);
+        if (eventOnce('BrowserPurchase:' + browserPurchaseId, 86400)) {
+            triggerHybridPixel('Purchase', {
+                value: cfg.purchase.value || 0,
+                currency: cfg.purchase.currency || cfg.currency || 'BDT',
+                content_ids: cfg.purchase.content_ids || [],
+                contents: cfg.purchase.contents || [],
+                content_type: cfg.purchase.content_type || 'product',
+                num_items: cfg.purchase.num_items || 0,
+                order_id: cfg.purchase.order_id || ''
+            }, browserPurchaseId);
+        }
+    }
+
     function sendViewContentOnce() {
         refreshResolvedContext();
         if (!cfg.events || !cfg.events.viewcontent) return;
@@ -1700,8 +1734,8 @@
         if (!phone) return null;
         var checkout = checkoutPayload('incomplete_checkout_capture');
         var campaignData = {};
-        ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'].forEach(function(key) {
-            var value = getQueryParam(key);
+        ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'bk_platform', 'bk_campaign_id', 'bk_adset_id', 'bk_ad_id'].forEach(function(key) {
+            var value = getQueryParam(key) || getCookie('_buykorigw_' + key);
             if (value) campaignData[key] = value;
         });
         var addressParts = [

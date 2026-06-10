@@ -1,21 +1,21 @@
-from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, ForeignKey, Float
+﻿from sqlalchemy import Boolean, Column, Integer, String, DateTime, Text, ForeignKey, Float
 from sqlalchemy.sql import func
 from app.database import Base
 
 
 class EventLog(Base):
-    """প্রতিটি ইভেন্ট কলের লগ — ডিবাগিং, অ্যানালিটিক্স ও বিলিং-এর জন্য"""
+    """à¦ªà§à¦°à¦¤à¦¿à¦Ÿà¦¿ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦•à¦²à§‡à¦° à¦²à¦— â€” à¦¡à¦¿à¦¬à¦¾à¦—à¦¿à¦‚, à¦…à§à¦¯à¦¾à¦¨à¦¾à¦²à¦¿à¦Ÿà¦¿à¦•à§à¦¸ à¦“ à¦¬à¦¿à¦²à¦¿à¦‚-à¦à¦° à¦œà¦¨à§à¦¯"""
     __tablename__ = "event_logs"
 
     id = Column(Integer, primary_key=True, index=True)
     client_id = Column(Integer, ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True)
     event_name = Column(String, nullable=False, index=True)  # PageView, Purchase, etc.
     event_id = Column(String, nullable=True, index=True)     # Deduplication key (client_id + event_id = unique)
-    event_count = Column(Integer, default=1)                 # একবারে কয়টি ইভেন্ট পাঠানো হয়েছে
+    event_count = Column(Integer, default=1)                 # à¦à¦•à¦¬à¦¾à¦°à§‡ à¦•à¦¯à¦¼à¦Ÿà¦¿ à¦‡à¦­à§‡à¦¨à§à¦Ÿ à¦ªà¦¾à¦ à¦¾à¦¨à§‹ à¦¹à¦¯à¦¼à§‡à¦›à§‡
     status = Column(String, nullable=False, default="success")  # success / failed
-    fb_response = Column(Text, nullable=True)                # Facebook-এর response JSON
-    error_message = Column(Text, nullable=True)              # Error হলে message
-    ip_address = Column(String, nullable=True)               # রিকোয়েস্টের IP
+    fb_response = Column(Text, nullable=True)                # Facebook-à¦à¦° response JSON
+    error_message = Column(Text, nullable=True)              # Error à¦¹à¦²à§‡ message
+    ip_address = Column(String, nullable=True)               # à¦°à¦¿à¦•à§‹à¦¯à¦¼à§‡à¦¸à§à¦Ÿà§‡à¦° IP
     visitor_key = Column(String(80), nullable=True, index=True)
     geo_country = Column(String(8), nullable=True, index=True)
     geo_region = Column(String(80), nullable=True)
@@ -44,6 +44,13 @@ class EventLog(Base):
     has_click_id = Column(Boolean, nullable=False, default=False)
     has_event_id = Column(Boolean, nullable=False, default=False)
     has_utm = Column(Boolean, nullable=False, default=False)
+
+    # Attribution Keys
+    ad_platform = Column(String(30), nullable=True, index=True)
+    ad_campaign_id = Column(String(100), nullable=True, index=True)
+    ad_adset_id = Column(String(100), nullable=True, index=True)
+    ad_id = Column(String(100), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     from sqlalchemy import Index
@@ -53,4 +60,5 @@ class EventLog(Base):
         Index("ix_event_logs_geo_district", "client_id", "geo_district", "created_at"),
         Index("ix_event_logs_visitor_funnel", "client_id", "geo_district", "event_name", "visitor_key", "created_at"),
         Index("ix_event_logs_device_type", "client_id", "device_type", "created_at"),
+        Index("ix_event_logs_ad_campaign", "client_id", "ad_campaign_id", "created_at"),
     )

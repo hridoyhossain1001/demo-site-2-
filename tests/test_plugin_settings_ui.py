@@ -26,7 +26,7 @@ def test_plugin_settings_ui_is_client_focused():
     assert "Use this only when the latest Buykori AdSync version is not appearing" in settings_php
     assert "Debug & Logging" not in settings_php
     assert "name=\"<?php echo BUYKORIGW_OPTION_KEY; ?>[tracking_mode]\" value=\"auto\"" in settings_php
-    assert "name=\"<?php echo BUYKORIGW_OPTION_KEY; ?>[enable_variations]\" value=\"1\"" in settings_php
+    assert "name=\"<?php echo BUYKORIGW_OPTION_KEY; ?>[enable_variations]\" value=\"0\"" in settings_php
 
 
 def test_optional_event_defaults_policy_keeps_only_recommended_events_on():

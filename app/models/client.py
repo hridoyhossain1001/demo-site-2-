@@ -11,6 +11,8 @@ class Client(Base):
     name = Column(String, nullable=False)                         # ক্লায়েন্টের নাম
     api_key = Column(String, unique=True, nullable=False,          # অটো-জেনারেটেড API Key
                      default=lambda: secrets.token_urlsafe(32))
+    old_api_key = Column(String, unique=True, nullable=True)      # rotated key for grace period
+    api_key_rotated_at = Column(DateTime(timezone=True), nullable=True) # key rotation timestamp
     public_key = Column(String, unique=True, nullable=False,       # Browser-safe tracker key
                         default=lambda: secrets.token_urlsafe(24))
     portal_key = Column(String, unique=True, nullable=True)        # Client portal login secret

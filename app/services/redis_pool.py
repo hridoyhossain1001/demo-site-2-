@@ -5,6 +5,16 @@ import os
 logger = logging.getLogger(__name__)
 
 _redis_client = None
+_redis_fallback_counts: dict[str, int] = {}
+
+
+def record_redis_fallback(name: str) -> None:
+    key = str(name or "unknown")
+    _redis_fallback_counts[key] = _redis_fallback_counts.get(key, 0) + 1
+
+
+def redis_fallback_counts() -> dict[str, int]:
+    return dict(_redis_fallback_counts)
 
 
 def get_redis():
@@ -30,7 +40,10 @@ def get_redis():
         )
         return _redis_client
     except Exception as exc:
-        logger.warning(f"Redis client init failed: {exc}")
+        import re
+        safe_msg = re.sub(r":[^/@]+@", ":***@", str(exc))
+        logger.warning(f"Redis client init failed: {safe_msg}")
+        record_redis_fallback("init")
         return None
 
 
@@ -44,4 +57,6 @@ async def close_redis() -> None:
     try:
         await client.aclose()
     except Exception as exc:
-        logger.warning(f"Error during Redis close: {exc}")
+        import re
+        safe_msg = re.sub(r":[^/@]+@", ":***@", str(exc))
+        logger.warning(f"Error during Redis close: {safe_msg}")

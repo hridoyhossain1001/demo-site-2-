@@ -1,4 +1,4 @@
-"""
+﻿"""
 Durable event outbox worker.
 
 The /events endpoint persists accepted events into event_outbox and returns quickly.
@@ -24,7 +24,7 @@ from app.schemas.event import EventData, UserData, _clean_and_hash
 from app.services.delivery_service import deliver_events_to_platforms, wait_for_secondary_tasks
 from app.services.event_quality import boost_event_quality
 from app.services.geoip_service import get_location_data
-from app.services.redis_pool import get_redis
+from app.services.redis_pool import get_redis, record_redis_fallback
 from app.services.usage_service import increment_usage_counters_db, rollback_usage_reservation
 from app.utils.event_log_helpers import build_event_log_kwargs as _event_log_kwargs
 
@@ -72,6 +72,10 @@ def _event_order_id(event: EventData) -> str:
 
 
 def _enrich_event(event: EventData, context: dict) -> EventData:
+    custom_extra = getattr(getattr(event, "custom_data", None), "model_extra", None) or {}
+    if custom_extra.get("_enriched") or getattr(getattr(event, "custom_data", None), "_enriched", False):
+        return event
+
     if not event.user_data:
         event.user_data = UserData()
 
@@ -128,6 +132,7 @@ async def _enqueue_events_redis_stream(
         )
     except Exception as exc:
         logger.warning(f"Redis Stream enqueue failed; falling back to DB outbox: {exc}")
+        record_redis_fallback("stream_enqueue")
         return None
 
 
@@ -249,6 +254,7 @@ async def bridge_redis_stream_once() -> int:
             ack_ids.append(message_id)
         except Exception as exc:
             logger.warning(f"Redis Stream event {message_id} bridge failed: {exc}")
+            record_redis_fallback("stream_bridge")
 
     if ack_ids:
         await r.xack(REDIS_STREAM_KEY, REDIS_STREAM_GROUP, *ack_ids)
@@ -358,6 +364,28 @@ async def _mark_dead(db, row: EventOutbox, client, error_message: str) -> None:
         except Exception as usage_error:
             logger.warning(f"[{client.name}] Outbox usage rollback failed: {usage_error}")
 
+    # Trigger DLQ Webhook alert if configured
+    if client.webhook_url:
+        try:
+            from app.services.webhook_service import send_webhook
+            payloads = row.event_payload or []
+            if isinstance(payloads, dict):
+                payloads = [payloads]
+            event_names = ", ".join(list(set(str(evt.get("event_name", "Unknown")) for evt in payloads if isinstance(evt, dict))))
+            event_ids = ", ".join(list(set(str(evt.get("event_id", "Unknown")) for evt in payloads if isinstance(evt, dict))))
+
+            alert_data = {
+                "client_id": client.id,
+                "client_name": client.name,
+                "event_ids": event_ids,
+                "event_names": event_names,
+                "error_message": error_message,
+                "status": "dead",
+            }
+            asyncio.create_task(send_webhook(client.webhook_url, "dlq_alert", alert_data))
+        except Exception as alert_err:
+            logger.warning(f"[{client.name}] Failed to dispatch DLQ webhook alert: {alert_err}")
+
 
 async def process_outbox_row(row_id: int) -> None:
     async with AsyncSessionLocal() as db:
@@ -368,7 +396,7 @@ async def process_outbox_row(row_id: int) -> None:
         client_result = await db.execute(select(Client).where(Client.id == row.client_id))
         client_row = client_result.scalar_one_or_none()
         if not client_row or not client_row.is_active:
-            # Client inactive or missing — mark dead without usage rollback
+            # Client inactive or missing â€” mark dead without usage rollback
             row.status = "dead"
             row.last_error = "Client inactive or missing"
             row.locked_at = None
@@ -430,7 +458,7 @@ async def process_outbox_row(row_id: int) -> None:
                         logger.warning(f"[{client.name}] Usage rollback failed for filtered events: {usage_err}")
 
                 await db.commit()
-                logger.debug(f"[{client.name}] Outbox row {row.id} filtered ({len(events)} events) — no platform enabled for these events.")
+                logger.debug(f"[{client.name}] Outbox row {row.id} filtered ({len(events)} events) â€” no platform enabled for these events.")
                 return
 
             row.status = "sent"

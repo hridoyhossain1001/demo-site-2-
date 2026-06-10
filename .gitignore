@@ -31,6 +31,10 @@ marketing-site/
 langchain/
 GeoLite2-City.mmdb
 *.mmdb.part
+local.db
+audit_reports/
+suggestion_match_*.md
+suggestions_full_raw.md
 
 # Server-side dev bundle (not needed in deployed static)
 app/static/client-portal/server.cjs

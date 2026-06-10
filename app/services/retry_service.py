@@ -188,13 +188,35 @@ async def retry_failed_events():
                     except Exception as e:
                         failed.retry_count += 1
                         failed.last_retry_at = datetime.now(timezone.utc)
-                        failed.status = "retrying" if failed.retry_count < failed.max_retries else "dead"
+                        is_dead = failed.retry_count >= failed.max_retries
+                        failed.status = "retrying" if not is_dead else "dead"
                         failed.error_message = str(e)[:500]
                         await db.commit()
 
                         logger.warning(
                             f"[{client.name}] Retry #{failed.retry_count} ব্যর্থ: {str(e)[:100]}"
                         )
+
+                        if is_dead and client.webhook_url:
+                            try:
+                                from app.services.webhook_service import send_webhook
+                                payloads = failed.event_payload or []
+                                if isinstance(payloads, dict):
+                                    payloads = [payloads]
+                                event_names = ", ".join(list(set(str(evt.get("event_name", "Unknown")) for evt in payloads if isinstance(evt, dict))))
+                                event_ids = ", ".join(list(set(str(evt.get("event_id", "Unknown")) for evt in payloads if isinstance(evt, dict))))
+
+                                alert_data = {
+                                    "client_id": client.id,
+                                    "client_name": client.name,
+                                    "event_ids": event_ids,
+                                    "event_names": event_names,
+                                    "error_message": failed.error_message,
+                                    "status": "dead",
+                                }
+                                asyncio.create_task(send_webhook(client.webhook_url, "dlq_alert", alert_data))
+                            except Exception as alert_err:
+                                logger.warning(f"[{client.name}] Failed to dispatch DLQ webhook alert from retry: {alert_err}")
 
         except Exception as e:
             logger.error(f"Retry service error: {e}")

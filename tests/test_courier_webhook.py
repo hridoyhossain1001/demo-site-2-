@@ -92,7 +92,8 @@ def _request(
 
 
 @pytest.mark.asyncio
-async def test_pathao_integration_handshake_echoes_secret_without_internal_guard():
+async def test_pathao_integration_handshake_echoes_secret_without_internal_guard(monkeypatch):
+    monkeypatch.setattr(courier_webhook, "PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET", "integration-secret")
     request = _request(
         b'{"event":"webhook_integration"}',
         headers=[(b"x-pathao-signature", b"integration-secret")],
