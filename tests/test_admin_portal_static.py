@@ -35,6 +35,24 @@ def test_admin_portal_contains_courier_queue_monitor_contract():
     assert 'id="workerMonitorRows"' in index_html
     assert 'id="supportNotesList"' in index_html
     assert 'id="courierQueueHealthBanner"' in index_html
+
+
+def test_admin_portal_contains_recovery_and_notification_operations_contract():
+    app_js = (WORKSPACE / "admin-portal" / "app.js").read_text(encoding="utf-8")
+    index_html = (WORKSPACE / "admin-portal" / "index.html").read_text(encoding="utf-8")
+    styles_css = (WORKSPACE / "admin-portal" / "styles.css").read_text(encoding="utf-8")
+
+    assert 'data-tab="recoveryOps"' in index_html
+    assert 'id="recoveryRows"' in index_html
+    assert 'id="recoveryClientFilter"' in index_html
+    assert "/admin/api/incomplete-checkouts?${params.toString()}" in app_js
+    assert "/admin/api/incomplete-checkouts/${checkoutId}" in app_js
+
+    assert 'data-tab="notificationOps"' in index_html
+    assert 'id="notificationRows"' in index_html
+    assert 'id="whatsappInstanceRows"' in index_html
+    assert "/admin/notification-jobs?${params.toString()}" in app_js
+    assert 'api("/admin/whatsapp-instances")' in app_js
     assert 'id="queueDrawerOverlay"' in index_html
     assert ".queue-alert-critical" in styles_css
     assert ".queue-health-banner" in styles_css

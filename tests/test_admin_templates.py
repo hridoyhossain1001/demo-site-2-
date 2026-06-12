@@ -711,6 +711,61 @@ async def test_admin_api_client_intelligence_support_notes_and_server_health():
 
 
 @pytest.mark.anyio
+async def test_admin_api_incomplete_checkout_operations_masks_customer_data_and_updates_status():
+    from app.models.incomplete_checkout import IncompleteCheckout
+
+    async with TestingSessionLocal() as session:
+        client_row = Client(
+            name="Recovery Ops Store",
+            api_key="recovery-ops-api-key",
+            portal_key="recovery-ops-portal-key",
+            pixel_id="123456700",
+            access_token=encrypt_token("fb-token"),
+            domain="recovery.example.com",
+            is_active=True,
+        )
+        session.add(client_row)
+        await session.flush()
+        checkout = IncompleteCheckout(
+            client_id=client_row.id,
+            visitor_id="visitor-recovery-ops",
+            phone="8801712345678",
+            phone_hash="phone-hash-recovery-ops",
+            customer_name="Recovery Customer",
+            email="customer@example.com",
+            address="Secret address",
+            products=[{"content_name": "Black Bra", "quantity": 1}],
+            amount=950,
+            status="incomplete",
+        )
+        session.add(checkout)
+        await session.commit()
+        client_id = client_row.id
+        checkout_id = checkout.id
+
+    api_client = TestClient(app)
+    headers = {"X-Admin-API-Key": "test-admin-api-key"}
+    response = api_client.get(
+        f"/api/v1/admin/api/incomplete-checkouts?client_id={client_id}",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["phone_masked"] == "***5678"
+    assert "phone" not in item
+    assert item["address_present"] is True
+    assert item["product_summary"] == "Black Bra"
+
+    updated = api_client.patch(
+        f"/api/v1/admin/api/incomplete-checkouts/{checkout_id}",
+        headers=headers,
+        json={"status": "contacted"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["item"]["status"] == "contacted"
+
+
+@pytest.mark.anyio
 async def test_admin_client_edit_syncs_trial_and_paid_growth_quotas():
     async with TestingSessionLocal() as session:
         client_row = Client(

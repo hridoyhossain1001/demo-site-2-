@@ -115,6 +115,10 @@ class AdminSupportNoteCreate(BaseModel):
     note: str
 
 
+class AdminIncompleteStatusUpdate(BaseModel):
+    status: str
+
+
 class AdminSiteBindingRelease(BaseModel):
     reason: str
 
@@ -547,6 +551,41 @@ def _support_note_to_api(note: ClientSupportNote) -> dict:
         "note": note.note,
         "created_by": note.created_by,
         "created_at": note.created_at.isoformat() if note.created_at else None,
+    }
+
+
+def _mask_phone(value: str | None) -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return f"***{digits[-4:]}" if digits else ""
+
+
+def _incomplete_checkout_to_admin(row: IncompleteCheckout, client_name: str | None) -> dict:
+    products = row.products if isinstance(row.products, list) else []
+    product_names = []
+    for product in products[:3]:
+        if not isinstance(product, dict):
+            continue
+        name = product.get("content_name") or product.get("name") or product.get("title")
+        if name:
+            product_names.append(str(name))
+    return {
+        "id": row.id,
+        "client_id": row.client_id,
+        "client_name": client_name or f"Client #{row.client_id}",
+        "customer_name": row.customer_name or "",
+        "phone_masked": _mask_phone(row.phone),
+        "email_present": bool(row.email),
+        "address_present": bool(row.address),
+        "product_summary": ", ".join(product_names),
+        "product_count": len(products),
+        "amount": float(row.amount or 0),
+        "currency": row.currency or "BDT",
+        "status": row.status,
+        "order_id": row.order_id,
+        "page_url": row.page_url,
+        "last_activity_at": row.last_activity_at.isoformat() if row.last_activity_at else None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "converted_at": row.converted_at.isoformat() if row.converted_at else None,
     }
 
 
@@ -1237,6 +1276,106 @@ async def admin_api_create_client_support_note(
     await db.commit()
     await db.refresh(note)
     return {"status": "success", "note": _support_note_to_api(note)}
+
+
+@router.get("/admin/api/incomplete-checkouts")
+async def admin_api_incomplete_checkouts(
+    limit: int = Query(default=100, ge=1, le=250),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = None,
+    client_id: int | None = None,
+    _: str = Depends(verify_admin_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    allowed = {"active", "incomplete", "contacted", "recovered", "ignored", "expired"}
+    if status and status not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid incomplete checkout status.")
+
+    filters = []
+    if status:
+        filters.append(IncompleteCheckout.status == status)
+    if client_id:
+        filters.append(IncompleteCheckout.client_id == client_id)
+
+    stmt = (
+        select(IncompleteCheckout, Client.name)
+        .join(Client, Client.id == IncompleteCheckout.client_id)
+        .order_by(IncompleteCheckout.last_activity_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    count_stmt = select(func.count(IncompleteCheckout.id))
+    counts_stmt = select(IncompleteCheckout.status, func.count(IncompleteCheckout.id)).group_by(IncompleteCheckout.status)
+    client_counts_stmt = (
+        select(IncompleteCheckout.client_id, Client.name, func.count(IncompleteCheckout.id))
+        .join(Client, Client.id == IncompleteCheckout.client_id)
+        .group_by(IncompleteCheckout.client_id, Client.name)
+        .order_by(func.count(IncompleteCheckout.id).desc())
+        .limit(10)
+    )
+    for condition in filters:
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+        counts_stmt = counts_stmt.where(condition)
+        client_counts_stmt = client_counts_stmt.where(condition)
+
+    rows = (await db.execute(stmt)).all()
+    total = await db.scalar(count_stmt) or 0
+    status_counts = {
+        row_status: int(count or 0)
+        for row_status, count in (await db.execute(counts_stmt)).all()
+    }
+    top_clients = [
+        {"client_id": cid, "client_name": name, "count": int(count or 0)}
+        for cid, name, count in (await db.execute(client_counts_stmt)).all()
+    ]
+
+    return {
+        "total": int(total),
+        "counts": status_counts,
+        "top_clients": top_clients,
+        "items": [_incomplete_checkout_to_admin(checkout, client_name) for checkout, client_name in rows],
+    }
+
+
+@router.patch("/admin/api/incomplete-checkouts/{checkout_id}")
+async def admin_api_update_incomplete_checkout(
+    checkout_id: int,
+    payload: AdminIncompleteStatusUpdate,
+    request: Request,
+    actor: str = Depends(verify_admin_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    allowed = {"contacted", "ignored", "incomplete"}
+    if payload.status not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid status for admin update.")
+    result = await db.execute(
+        select(IncompleteCheckout)
+        .where(IncompleteCheckout.id == checkout_id)
+        .with_for_update()
+    )
+    checkout = result.scalar_one_or_none()
+    if not checkout:
+        raise HTTPException(status_code=404, detail="Incomplete checkout not found.")
+    if checkout.status in {"recovered", "expired"}:
+        raise HTTPException(status_code=409, detail="This incomplete checkout can no longer be changed.")
+
+    checkout.status = payload.status
+    checkout.last_activity_at = datetime.now(timezone.utc)
+    await db.flush()
+    await log_admin_action(
+        db,
+        request,
+        actor,
+        "incomplete_checkout.status_updated",
+        checkout.client_id,
+        f"Incomplete checkout #{checkout.id} marked {payload.status}",
+    )
+    await db.commit()
+    await db.refresh(checkout)
+    client = await db.get(Client, checkout.client_id)
+    return {"status": "success", "item": _incomplete_checkout_to_admin(checkout, client.name if client else None)}
+
 
 @router.post("/admin/api/clients/{client_id}/keys/rotate")
 @limiter.limit("10/minute")
