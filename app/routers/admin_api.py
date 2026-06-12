@@ -24,6 +24,13 @@ from app.models.failed_event import FailedEvent
 from app.models.pending_event import PendingEvent
 from app.models.site_binding import SiteBinding
 from app.models.usage_counter import UsageCounter
+from app.models.plugin_connect_session import PluginConnectSession
+from app.models.trial_identity import TrialIdentity
+from app.models.notification_job import NotificationJob
+from app.models.incomplete_checkout import IncompleteCheckout
+from app.models.ad_insight_daily import AdInsightDaily
+from app.models.ad_account import AdAccount
+from app.models.ad_campaign import AdCampaign
 from app.security import encrypt_token
 from app.services.auth_service import verify_admin_password
 from app.services.webhook_service import _webhook_url_allowed
@@ -1282,6 +1289,16 @@ async def admin_api_delete_client(
     client_name = client.name
     client_api_key = client.api_key
 
+    # Delete client dependencies in order to avoid foreign key violations
+    await db.execute(sql_delete(CourierBookingJob).where(CourierBookingJob.client_id == client_id))
+    await db.execute(sql_delete(CourierOrder).where(CourierOrder.client_id == client_id))
+    await db.execute(sql_delete(AdCampaign).where(AdCampaign.ad_account_id.in_(select(AdAccount.id).where(AdAccount.client_id == client_id))))
+    await db.execute(sql_delete(AdAccount).where(AdAccount.client_id == client_id))
+    await db.execute(sql_delete(AdInsightDaily).where(AdInsightDaily.client_id == client_id))
+    await db.execute(sql_delete(NotificationJob).where(NotificationJob.client_id == client_id))
+    await db.execute(sql_delete(IncompleteCheckout).where(IncompleteCheckout.client_id == client_id))
+    await db.execute(sql_delete(PluginConnectSession).where(PluginConnectSession.client_id == client_id))
+    await db.execute(sql_delete(TrialIdentity).where(TrialIdentity.client_id == client_id))
     await db.execute(sql_delete(EventOutbox).where(EventOutbox.client_id == client_id))
     await db.execute(sql_delete(FailedEvent).where(FailedEvent.client_id == client_id))
     await db.execute(sql_delete(PendingEvent).where(PendingEvent.client_id == client_id))

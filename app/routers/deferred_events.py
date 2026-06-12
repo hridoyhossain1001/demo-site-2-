@@ -529,6 +529,50 @@ async def cancel_event(
 
 
 # ─── POST /events/cancel/bulk — Bulk Cancel ─────────────────────────────────
+@router.post(
+    "/events/cancel/restore",
+    response_model=ConfirmResponse,
+    summary="Restore a skipped pending Purchase event",
+)
+async def restore_cancelled_event(
+    payload: CancelRequest,
+    client: CachedClient = Depends(get_current_client),
+    db: AsyncSession = Depends(get_db),
+):
+    """Move a skipped Purchase event back to the pending verification queue."""
+    if not client.deferred_purchase:
+        raise HTTPException(
+            status_code=403,
+            detail="Deferred purchase feature is not enabled for this client.",
+        )
+
+    result = await db.execute(
+        select(PendingEvent).where(
+            and_(
+                PendingEvent.client_id == client.id,
+                PendingEvent.order_id == payload.order_id,
+            )
+        ).with_for_update()
+    )
+    pending = result.scalar_one_or_none()
+    if not pending:
+        raise HTTPException(status_code=404, detail=f"Order not found: {payload.order_id}")
+    if pending.status != "cancelled":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only skipped events can be restored. Current status: {pending.status}",
+        )
+
+    pending.status = "pending"
+    await db.commit()
+
+    logger.info("[%s] Restored skipped order to pending: %s", client.name, payload.order_id)
+    return ConfirmResponse(
+        status="success",
+        order_id=payload.order_id,
+        message="Purchase event restored to the verification queue.",
+    )
+
 
 @router.post(
     "/events/cancel/bulk",

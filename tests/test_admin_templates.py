@@ -885,6 +885,24 @@ async def test_admin_api_events_endpoint():
 
 @pytest.mark.anyio
 async def test_admin_api_delete_client_with_users_and_sessions():
+    # Import all models locally for cleanup verification
+    from app.models.plugin_connect_session import PluginConnectSession
+    from app.models.trial_identity import TrialIdentity
+    from app.models.notification_job import NotificationJob
+    from app.models.incomplete_checkout import IncompleteCheckout
+    from app.models.courier_booking_job import CourierBookingJob
+    from app.models.courier_order import CourierOrder
+    from app.models.ad_insight_daily import AdInsightDaily
+    from app.models.ad_account import AdAccount
+    from app.models.ad_campaign import AdCampaign
+    from app.models.client_support_note import ClientSupportNote
+    from app.models.event_outbox import EventOutbox
+    from app.models.failed_event import FailedEvent
+    from app.models.event_dedup import EventDedup
+    from app.models.usage_counter import UsageCounter
+    from app.models.event_log import EventLog
+    from app.models.site_binding import SiteBinding
+
     async with TestingSessionLocal() as session:
         # Create a client
         client_to_del = Client(
@@ -919,6 +937,48 @@ async def test_admin_api_delete_client_with_users_and_sessions():
             expires_at=datetime.now(timezone.utc) + timedelta(days=7),
         )
         session.add(sess)
+
+        # Populate all other dependencies
+        session.add(ClientSupportNote(client_id=client_to_del.id, note="some note", created_by="admin"))
+        session.add(SiteBinding(client_id=client_to_del.id, site_host="example.com", root_domain="example.com"))
+        session.add(PluginConnectSession(
+            client_id=client_to_del.id,
+            site_url="https://example.com",
+            site_host="example.com",
+            return_url="https://example.com",
+            state="state",
+            code_hash="hash_api",
+            code_challenge="challenge",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
+        ))
+        session.add(TrialIdentity(client_id=client_to_del.id, domain="example.com", pixel_id="111111"))
+        session.add(NotificationJob(client_id=client_to_del.id, event_type="purchase", payload={}, dedupe_key="dedupe-key-api"))
+        session.add(IncompleteCheckout(client_id=client_to_del.id, visitor_id="visitor", phone="123", phone_hash="hash"))
+        
+        pending = PendingEvent(client_id=client_to_del.id, order_id="ORDER-123", event_data={}, raw_order_data={}, status="pending", portal_state="pending", is_confirmed=False)
+        session.add(pending)
+        await session.flush()
+        
+        order = CourierOrder(client_id=client_to_del.id, pending_event_id=pending.id, order_id="ORDER-123", courier_provider="steadfast", courier_status="pending")
+        session.add(order)
+        await session.flush()
+        
+        session.add(CourierBookingJob(client_id=client_to_del.id, pending_event_id=pending.id, courier_order_id=order.id, provider="steadfast", request_payload={}))
+        
+        session.add(AdInsightDaily(client_id=client_to_del.id, platform="meta", external_campaign_id="camp-123", insight_date=datetime.now(timezone.utc).date(), spend=10.0, impressions=100, clicks=10, platform_purchases=1))
+        
+        ad_acc = AdAccount(client_id=client_to_del.id, platform="meta", external_account_id="act-123", access_token_enc="enc")
+        session.add(ad_acc)
+        await session.flush()
+        
+        session.add(AdCampaign(ad_account_id=ad_acc.id, platform="meta", external_campaign_id="camp-123", name="Camp 1"))
+        
+        session.add(EventOutbox(client_id=client_to_del.id, event_payload={}, status="queued"))
+        session.add(FailedEvent(client_id=client_to_del.id, event_payload={}, error_message="failed"))
+        session.add(EventDedup(client_id=client_to_del.id, event_id="evt-123"))
+        session.add(UsageCounter(client_id=client_to_del.id, window_key="key", count=1))
+        session.add(EventLog(client_id=client_to_del.id, event_name="Purchase", event_count=1, status="success"))
+
         await session.commit()
         await session.refresh(client_to_del)
         client_id = client_to_del.id
@@ -931,20 +991,50 @@ async def test_admin_api_delete_client_with_users_and_sessions():
     assert response.status_code == 200
     assert response.json()["status"] == "success"
 
-    # Verify database is clean
+    # Verify database is clean for all target models
     async with TestingSessionLocal() as session:
-        client_check = await session.get(Client, client_id)
-        assert client_check is None
-        
-        user_check = (await session.execute(select(ClientUser).where(ClientUser.client_id == client_id))).scalars().all()
-        assert len(user_check) == 0
-
-        sess_check = (await session.execute(select(ClientSession).where(ClientSession.client_id == client_id))).scalars().all()
-        assert len(sess_check) == 0
+        assert (await session.get(Client, client_id)) is None
+        assert len((await session.execute(select(ClientUser).where(ClientUser.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(ClientSession).where(ClientSession.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(ClientSupportNote).where(ClientSupportNote.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(SiteBinding).where(SiteBinding.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(PluginConnectSession).where(PluginConnectSession.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(TrialIdentity).where(TrialIdentity.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(NotificationJob).where(NotificationJob.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(IncompleteCheckout).where(IncompleteCheckout.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(PendingEvent).where(PendingEvent.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(CourierOrder).where(CourierOrder.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(CourierBookingJob).where(CourierBookingJob.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(AdInsightDaily).where(AdInsightDaily.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(AdAccount).where(AdAccount.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(AdCampaign).where(AdCampaign.ad_account_id.in_(select(AdAccount.id).where(AdAccount.client_id == client_id))))).scalars().all()) == 0
+        assert len((await session.execute(select(EventOutbox).where(EventOutbox.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(FailedEvent).where(FailedEvent.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(EventDedup).where(EventDedup.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(UsageCounter).where(UsageCounter.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(EventLog).where(EventLog.client_id == client_id))).scalars().all()) == 0
 
 
 @pytest.mark.anyio
 async def test_admin_views_delete_client_with_users_and_sessions():
+    # Import all models locally for cleanup verification
+    from app.models.plugin_connect_session import PluginConnectSession
+    from app.models.trial_identity import TrialIdentity
+    from app.models.notification_job import NotificationJob
+    from app.models.incomplete_checkout import IncompleteCheckout
+    from app.models.courier_booking_job import CourierBookingJob
+    from app.models.courier_order import CourierOrder
+    from app.models.ad_insight_daily import AdInsightDaily
+    from app.models.ad_account import AdAccount
+    from app.models.ad_campaign import AdCampaign
+    from app.models.client_support_note import ClientSupportNote
+    from app.models.event_outbox import EventOutbox
+    from app.models.failed_event import FailedEvent
+    from app.models.event_dedup import EventDedup
+    from app.models.usage_counter import UsageCounter
+    from app.models.event_log import EventLog
+    from app.models.site_binding import SiteBinding
+
     async with TestingSessionLocal() as session:
         # Create a client
         client_to_del = Client(
@@ -979,6 +1069,48 @@ async def test_admin_views_delete_client_with_users_and_sessions():
             expires_at=datetime.now(timezone.utc) + timedelta(days=7),
         )
         session.add(sess)
+
+        # Populate all other dependencies
+        session.add(ClientSupportNote(client_id=client_to_del.id, note="some note view", created_by="admin"))
+        session.add(SiteBinding(client_id=client_to_del.id, site_host="example.com", root_domain="example.com"))
+        session.add(PluginConnectSession(
+            client_id=client_to_del.id,
+            site_url="https://example.com",
+            site_host="example.com",
+            return_url="https://example.com",
+            state="state",
+            code_hash="hash_view",
+            code_challenge="challenge",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
+        ))
+        session.add(TrialIdentity(client_id=client_to_del.id, domain="example.com", pixel_id="222222"))
+        session.add(NotificationJob(client_id=client_to_del.id, event_type="purchase", payload={}, dedupe_key="dedupe-key-view"))
+        session.add(IncompleteCheckout(client_id=client_to_del.id, visitor_id="visitor", phone="456", phone_hash="hash"))
+        
+        pending = PendingEvent(client_id=client_to_del.id, order_id="ORDER-456", event_data={}, raw_order_data={}, status="pending", portal_state="pending", is_confirmed=False)
+        session.add(pending)
+        await session.flush()
+        
+        order = CourierOrder(client_id=client_to_del.id, pending_event_id=pending.id, order_id="ORDER-456", courier_provider="steadfast", courier_status="pending")
+        session.add(order)
+        await session.flush()
+        
+        session.add(CourierBookingJob(client_id=client_to_del.id, pending_event_id=pending.id, courier_order_id=order.id, provider="steadfast", request_payload={}))
+        
+        session.add(AdInsightDaily(client_id=client_to_del.id, platform="meta", external_campaign_id="camp-456", insight_date=datetime.now(timezone.utc).date(), spend=10.0, impressions=100, clicks=10, platform_purchases=1))
+        
+        ad_acc = AdAccount(client_id=client_to_del.id, platform="meta", external_account_id="act-456", access_token_enc="enc")
+        session.add(ad_acc)
+        await session.flush()
+        
+        session.add(AdCampaign(ad_account_id=ad_acc.id, platform="meta", external_campaign_id="camp-456", name="Camp 2"))
+        
+        session.add(EventOutbox(client_id=client_to_del.id, event_payload={}, status="queued"))
+        session.add(FailedEvent(client_id=client_to_del.id, event_payload={}, error_message="failed"))
+        session.add(EventDedup(client_id=client_to_del.id, event_id="evt-456"))
+        session.add(UsageCounter(client_id=client_to_del.id, window_key="key", count=1))
+        session.add(EventLog(client_id=client_to_del.id, event_name="Purchase", event_count=1, status="success"))
+
         await session.commit()
         await session.refresh(client_to_del)
         client_id = client_to_del.id
@@ -998,16 +1130,28 @@ async def test_admin_views_delete_client_with_users_and_sessions():
     assert response.status_code == 303  # redirect status
     assert "deleted" in response.headers["location"].lower()
 
-    # Verify database is clean
+    # Verify database is clean for all target models
     async with TestingSessionLocal() as session:
-        client_check = await session.get(Client, client_id)
-        assert client_check is None
-        
-        user_check = (await session.execute(select(ClientUser).where(ClientUser.client_id == client_id))).scalars().all()
-        assert len(user_check) == 0
-
-        sess_check = (await session.execute(select(ClientSession).where(ClientSession.client_id == client_id))).scalars().all()
-        assert len(sess_check) == 0
+        assert (await session.get(Client, client_id)) is None
+        assert len((await session.execute(select(ClientUser).where(ClientUser.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(ClientSession).where(ClientSession.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(ClientSupportNote).where(ClientSupportNote.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(SiteBinding).where(SiteBinding.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(PluginConnectSession).where(PluginConnectSession.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(TrialIdentity).where(TrialIdentity.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(NotificationJob).where(NotificationJob.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(IncompleteCheckout).where(IncompleteCheckout.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(PendingEvent).where(PendingEvent.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(CourierOrder).where(CourierOrder.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(CourierBookingJob).where(CourierBookingJob.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(AdInsightDaily).where(AdInsightDaily.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(AdAccount).where(AdAccount.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(AdCampaign).where(AdCampaign.ad_account_id.in_(select(AdAccount.id).where(AdAccount.client_id == client_id))))).scalars().all()) == 0
+        assert len((await session.execute(select(EventOutbox).where(EventOutbox.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(FailedEvent).where(FailedEvent.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(EventDedup).where(EventDedup.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(UsageCounter).where(UsageCounter.client_id == client_id))).scalars().all()) == 0
+        assert len((await session.execute(select(EventLog).where(EventLog.client_id == client_id))).scalars().all()) == 0
 
 
 @pytest.mark.anyio

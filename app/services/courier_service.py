@@ -456,6 +456,9 @@ class CourierService:
         item_quantity: int = 1,
         item_weight: float = 0.5,
         item_description: Optional[str] = None,
+        recipient_city: Optional[int] = None,
+        recipient_zone: Optional[int] = None,
+        recipient_area: Optional[int] = None,
         base_url: str | None = None,
     ) -> Dict[str, Any]:
         """
@@ -495,12 +498,14 @@ class CourierService:
             "item_description": desc_to_use,
         }
 
-        if cls.pathao_is_sandbox(base_url):
-            # Sandbox currently expects explicit IDs. Live Pathao documents
-            # them as optional and resolves them from recipient_address.
-            city_id, zone_id, area_id = await cls.resolve_pathao_location(
-                token, recipient_address, base_url=base_url
-            )
+        explicit_location_ids = all((recipient_city, recipient_zone, recipient_area))
+        if explicit_location_ids or cls.pathao_is_sandbox(base_url):
+            if explicit_location_ids:
+                city_id, zone_id, area_id = recipient_city, recipient_zone, recipient_area
+            else:
+                city_id, zone_id, area_id = await cls.resolve_pathao_location(
+                    token, recipient_address, base_url=base_url
+                )
             payload.update(
                 recipient_city=city_id,
                 recipient_zone=zone_id,
@@ -511,7 +516,7 @@ class CourierService:
             "Pathao order payload: order=%s environment=%s explicit_location_ids=%s",
             merchant_order_id,
             "sandbox" if cls.pathao_is_sandbox(base_url) else "live",
-            cls.pathao_is_sandbox(base_url),
+            explicit_location_ids or cls.pathao_is_sandbox(base_url),
         )
 
         http = await get_http_client()

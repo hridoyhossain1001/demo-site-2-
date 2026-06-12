@@ -68,6 +68,9 @@ def _normalized_payload(pending: PendingEvent, overrides: dict | None = None) ->
         "delivery_area_id": str(raw.get("delivery_area_id") or "").strip() or None,
         "delivery_area_name": str(raw.get("delivery_area_name") or "").strip() or None,
         "pickup_store_id": str(raw.get("pickup_store_id") or "").strip() or None,
+        "recipient_city": int(raw["recipient_city"]) if raw.get("recipient_city") else None,
+        "recipient_zone": int(raw["recipient_zone"]) if raw.get("recipient_zone") else None,
+        "recipient_area": int(raw["recipient_area"]) if raw.get("recipient_area") else None,
         "item_weight": float(raw.get("item_weight") or 0.5),
         "item_quantity": int(raw.get("item_quantity") or 1),
         "item_description": raw.get("item_description") or _product_description(pending),
@@ -344,6 +347,9 @@ async def _send_to_provider(client: Client, provider: str, payload: dict, order_
             item_quantity=payload["item_quantity"],
             item_weight=payload["item_weight"],
             item_description=payload.get("item_description"),
+            recipient_city=payload.get("recipient_city"),
+            recipient_zone=payload.get("recipient_zone"),
+            recipient_area=payload.get("recipient_area"),
             base_url=CourierService.pathao_base_url(client.pathao_environment),
         )
     if provider == "redx":

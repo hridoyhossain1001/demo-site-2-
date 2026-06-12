@@ -77,6 +77,9 @@ class SendToCourierRequest(BaseModel):
     delivery_area_id: Optional[int] = None
     delivery_area_name: Optional[str] = None
     pickup_store_id: Optional[int] = None
+    recipient_city: Optional[int] = None
+    recipient_zone: Optional[int] = None
+    recipient_area: Optional[int] = None
 
 class CourierOrderResponse(BaseModel):
     id: int
@@ -308,6 +311,9 @@ async def send_order_to_courier(
                 "delivery_area_id": req.delivery_area_id,
                 "delivery_area_name": req.delivery_area_name,
                 "pickup_store_id": req.pickup_store_id,
+                "recipient_city": req.recipient_city,
+                "recipient_zone": req.recipient_zone,
+                "recipient_area": req.recipient_area,
             },
             purchase_event_sent=pending_event.portal_state == "operations_only",
         )
@@ -612,6 +618,45 @@ async def get_pathao_stores(
         base_url=CourierService.pathao_base_url(client.pathao_environment),
     )
     return stores
+
+
+async def _get_pathao_location_credentials(client: Client) -> tuple[str, str]:
+    if not client.pathao_api_key or not client.pathao_secret_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Pathao API credentials are not configured. Please set them in Settings."
+        )
+    try:
+        client_id, email = client.pathao_api_key.split("|", 1)
+        client_secret, password = decrypt_token(client.pathao_secret_key).split("|", 1)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Pathao credentials format is incorrect.") from exc
+    token = await CourierService.get_pathao_token(
+        client_id,
+        client_secret,
+        email,
+        password,
+        base_url=CourierService.pathao_base_url(client.pathao_environment),
+    )
+    return token, CourierService.pathao_base_url(client.pathao_environment)
+
+
+@router.get("/courier/pathao/cities")
+async def get_pathao_cities(client: Client = Depends(get_current_portal_client)):
+    token, base_url = await _get_pathao_location_credentials(client)
+    return await CourierService._get_pathao_cities(token, base_url=base_url)
+
+
+@router.get("/courier/pathao/zones")
+async def get_pathao_zones(city_id: int, client: Client = Depends(get_current_portal_client)):
+    token, base_url = await _get_pathao_location_credentials(client)
+    return await CourierService._get_pathao_zones(token, city_id, base_url=base_url)
+
+
+@router.get("/courier/pathao/areas")
+async def get_pathao_areas(zone_id: int, client: Client = Depends(get_current_portal_client)):
+    token, base_url = await _get_pathao_location_credentials(client)
+    return await CourierService._get_pathao_areas(token, zone_id, base_url=base_url)
 
 
 @router.get("/courier/redx/areas")
