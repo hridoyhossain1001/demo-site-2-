@@ -19,6 +19,7 @@ async def fetch_tiktok_daily_insights(
         "Content-Type": "application/json"
     }
 
+    page_size = 100
     params = {
         "advertiser_id": advertiser_id,
         "report_type": "BASIC",
@@ -27,21 +28,35 @@ async def fetch_tiktok_daily_insights(
         "metrics": '["spend", "clicks", "impressions", "conversion", "conversion_value"]',
         "start_date": start_date.strftime("%Y-%m-%d"),
         "end_date": end_date.strftime("%Y-%m-%d"),
-        "page_size": 100
+        "page_size": page_size,
     }
 
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, headers=headers, params=params, timeout=30.0)
-        if response.status_code != 200:
-            logger.error(f"TikTok API error: {response.text}")
-            response.raise_for_status()
+        rows = []
+        page = 1
+        while True:
+            page_params = {**params, "page": page}
+            response = await client.get(url, headers=headers, params=page_params, timeout=30.0)
+            if response.status_code != 200:
+                logger.error(f"TikTok API error: {response.text}")
+                response.raise_for_status()
 
-        res_data = response.json()
-        if res_data.get("code") != 0:
-            logger.error(f"TikTok Business API Business Error: {res_data.get('message')}")
-            return []
+            res_data = response.json()
+            if res_data.get("code") != 0:
+                logger.error(f"TikTok Business API Business Error: {res_data.get('message')}")
+                break
 
-        rows = res_data.get("data", {}).get("list", [])
+            data = res_data.get("data", {}) or {}
+            page_rows = data.get("list", []) or []
+            rows.extend(page_rows)
+            page_info = data.get("page_info", {}) or {}
+            total_page = int(page_info.get("total_page") or 0)
+            if total_page:
+                if page >= total_page:
+                    break
+            elif len(page_rows) < page_size:
+                break
+            page += 1
 
         normalized = []
         for row in rows:

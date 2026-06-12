@@ -24,17 +24,24 @@ async def fetch_meta_daily_insights(
         "limit": 500
     }
 
+    data = []
     async with httpx.AsyncClient() as client:
-        response = await client.get(url, params=params, timeout=30.0)
-        if response.status_code == 400 and "request limit reached" in response.text.lower():
-            logger.warning("Meta Graph API Rate Limit Hit. Activating backoff.")
-            return []
+        next_url = url
+        next_params = params
+        while next_url:
+            response = await client.get(next_url, params=next_params, timeout=30.0)
+            if response.status_code == 400 and "request limit reached" in response.text.lower():
+                logger.warning("Meta Graph API Rate Limit Hit. Activating backoff.")
+                break
 
-        if response.status_code != 200:
-            logger.error(f"Meta API error: {response.text}")
-            response.raise_for_status()
+            if response.status_code != 200:
+                logger.error(f"Meta API error: {response.text}")
+                response.raise_for_status()
 
-        data = response.json().get("data", [])
+            payload = response.json()
+            data.extend(payload.get("data", []))
+            next_url = payload.get("paging", {}).get("next")
+            next_params = None
 
         normalized = []
         for row in data:

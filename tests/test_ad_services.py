@@ -96,6 +96,61 @@ async def test_fetch_meta_daily_insights_rate_limit(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_meta_daily_insights_paginates(monkeypatch):
+    raw_token = "mock-meta-access-token"
+    enc_token = encrypt_token(raw_token)
+
+    first_response = MagicMock()
+    first_response.status_code = 200
+    first_response.json.return_value = {
+        "data": [
+            {
+                "campaign_id": "camp123",
+                "campaign_name": "Meta Campaign 1",
+                "date_start": "2026-06-01",
+                "spend": "100.00",
+                "impressions": "1000",
+                "clicks": "50",
+            }
+        ],
+        "paging": {"next": "https://graph.facebook.com/v20.0/next-page"}
+    }
+
+    second_response = MagicMock()
+    second_response.status_code = 200
+    second_response.json.return_value = {
+        "data": [
+            {
+                "campaign_id": "camp456",
+                "campaign_name": "Meta Campaign 2",
+                "date_start": "2026-06-02",
+                "spend": "200.00",
+                "impressions": "2000",
+                "clicks": "80",
+            }
+        ]
+    }
+
+    mock_get = AsyncMock(side_effect=[first_response, second_response])
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    results = await fetch_meta_daily_insights(
+        access_token_enc=enc_token,
+        act_id="act_123456789",
+        start_date=date(2026, 6, 1),
+        end_date=date(2026, 6, 2)
+    )
+
+    assert len(results) == 2
+    assert results[0]["campaign_id"] == "camp123"
+    assert results[1]["campaign_id"] == "camp456"
+    assert mock_get.call_count == 2
+    second_args, second_kwargs = mock_get.call_args_list[1]
+    assert second_args[0] == "https://graph.facebook.com/v20.0/next-page"
+    assert second_kwargs["params"] is None
+
+
+@pytest.mark.asyncio
 async def test_fetch_tiktok_daily_insights_success(monkeypatch):
     raw_token = "mock-tiktok-access-token"
     enc_token = encrypt_token(raw_token)
@@ -180,3 +235,78 @@ async def test_fetch_tiktok_daily_insights_error(monkeypatch):
     )
 
     assert results == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_tiktok_daily_insights_paginates(monkeypatch):
+    raw_token = "mock-tiktok-access-token"
+    enc_token = encrypt_token(raw_token)
+
+    first_response = MagicMock()
+    first_response.status_code = 200
+    first_response.json.return_value = {
+        "code": 0,
+        "message": "OK",
+        "data": {
+            "page_info": {"total_page": 2},
+            "list": [
+                {
+                    "metrics": {
+                        "spend": "50.00",
+                        "clicks": "20",
+                        "impressions": "1000",
+                        "conversion": "1",
+                        "conversion_value": "120.00"
+                    },
+                    "dimensions": {
+                        "campaign_id": "camp111",
+                        "campaign_name": "TikTok Campaign 1",
+                        "stat_time_day": "2026-06-01 00:00:00"
+                    }
+                }
+            ]
+        }
+    }
+
+    second_response = MagicMock()
+    second_response.status_code = 200
+    second_response.json.return_value = {
+        "code": 0,
+        "message": "OK",
+        "data": {
+            "page_info": {"total_page": 2},
+            "list": [
+                {
+                    "metrics": {
+                        "spend": "75.00",
+                        "clicks": "30",
+                        "impressions": "1500",
+                        "conversion": "2",
+                        "conversion_value": "260.00"
+                    },
+                    "dimensions": {
+                        "campaign_id": "camp222",
+                        "campaign_name": "TikTok Campaign 2",
+                        "stat_time_day": "2026-06-02 00:00:00"
+                    }
+                }
+            ]
+        }
+    }
+
+    mock_get = AsyncMock(side_effect=[first_response, second_response])
+    monkeypatch.setattr(httpx.AsyncClient, "get", mock_get)
+
+    results = await fetch_tiktok_daily_insights(
+        access_token_enc=enc_token,
+        advertiser_id="adv_77777",
+        start_date=date(2026, 6, 1),
+        end_date=date(2026, 6, 2)
+    )
+
+    assert len(results) == 2
+    assert results[0]["campaign_id"] == "camp111"
+    assert results[1]["campaign_id"] == "camp222"
+    assert mock_get.call_count == 2
+    assert mock_get.call_args_list[0].kwargs["params"]["page"] == 1
+    assert mock_get.call_args_list[1].kwargs["params"]["page"] == 2

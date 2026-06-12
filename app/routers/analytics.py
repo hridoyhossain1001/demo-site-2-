@@ -14,6 +14,7 @@ Endpoints:
 import csv
 import io
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -150,6 +151,7 @@ class AdPerformanceRow(BaseModel):
     campaign_name: str
     platform: str
     spend: float
+    spend_currency: str = ""
     clicks: int
     impressions: int
     ctr: float
@@ -160,6 +162,7 @@ class AdPerformanceRow(BaseModel):
     placed_cpa: float
     confirmed_purchases: int
     confirmed_revenue: float
+    revenue_currency: str = ""
     confirmed_roas: float
     confirmed_cpa: float
     browser_page_views: int
@@ -170,6 +173,7 @@ class AdPerformanceRow(BaseModel):
 class AdPerformanceResponse(BaseModel):
     status: str
     period_days: int
+    sync_enabled: bool = False
     data: list[AdPerformanceRow]
 
 
@@ -860,21 +864,33 @@ async def ad_performance_analytics(
         json_camp_id_expr = "COALESCE(pe.event_data->'custom_data'->>'ad_campaign_id', pe.event_data->'custom_data'->>'bk_campaign_id', pe.event_data->>'ad_campaign_id')"
         json_platform_expr = "COALESCE(pe.event_data->'custom_data'->>'ad_platform', pe.event_data->'custom_data'->>'bk_platform', pe.event_data->>'ad_platform')"
         json_val_expr = "CAST(COALESCE(pe.event_data->'custom_data'->>'value', '0.0') AS float)"
+        json_currency_expr = "COALESCE(pe.event_data->'custom_data'->>'currency', pe.event_data->>'currency')"
     else:
         tz_log_expr = "DATE(el.created_at)"
         tz_pending_expr = "DATE(pe.created_at)"
         json_camp_id_expr = "COALESCE(json_extract(pe.event_data, '$.custom_data.ad_campaign_id'), json_extract(pe.event_data, '$.custom_data.bk_campaign_id'), json_extract(pe.event_data, '$.ad_campaign_id'))"
         json_platform_expr = "COALESCE(json_extract(pe.event_data, '$.custom_data.ad_platform'), json_extract(pe.event_data, '$.custom_data.bk_platform'), json_extract(pe.event_data, '$.ad_platform'))"
         json_val_expr = "CAST(COALESCE(json_extract(pe.event_data, '$.custom_data.value'), 0.0) AS float)"
+        json_currency_expr = "COALESCE(json_extract(pe.event_data, '$.custom_data.currency'), json_extract(pe.event_data, '$.currency'))"
 
     query_str = f"""
-    WITH platform_insights AS (
+    WITH campaign_identity AS (
+        SELECT
+            c.external_campaign_id,
+            COUNT(DISTINCT c.platform) AS platform_count
+        FROM ad_campaigns c
+        JOIN ad_accounts a ON c.ad_account_id = a.id
+        WHERE a.client_id = :client_id
+        GROUP BY c.external_campaign_id
+    ),
+    platform_insights AS (
         SELECT
             platform,
             external_campaign_id,
             SUM(spend) AS total_spend,
             SUM(clicks) AS total_clicks,
-            SUM(impressions) AS total_impressions
+            SUM(impressions) AS total_impressions,
+            MAX(currency) AS spend_currency
         FROM ad_insights_daily
         WHERE client_id = :client_id
           AND insight_date BETWEEN :start_date AND :end_date
@@ -883,14 +899,16 @@ async def ad_performance_analytics(
     server_confirmed_events AS (
         SELECT
             c.id AS campaign_pk,
-            COUNT(el.id) AS purchases,
-            COALESCE(SUM(el.value), 0.0) AS revenue
+            COALESCE(SUM(el.event_count), 0) AS purchases,
+            COALESCE(SUM(el.value), 0.0) AS revenue,
+            MAX(el.currency) AS revenue_currency
         FROM event_logs el
         JOIN ad_campaigns c ON el.ad_campaign_id = c.external_campaign_id
         JOIN ad_accounts a ON c.ad_account_id = a.id
+        JOIN campaign_identity ci ON c.external_campaign_id = ci.external_campaign_id
         WHERE el.client_id = :client_id
           AND a.client_id = :client_id
-          AND (el.ad_platform IS NULL OR el.ad_platform = c.platform)
+          AND (el.ad_platform = c.platform OR (el.ad_platform IS NULL AND ci.platform_count = 1))
           AND el.event_name = 'Purchase'
           AND el.status = 'success'
           AND {tz_log_expr} BETWEEN :start_date AND :end_date
@@ -900,13 +918,15 @@ async def ad_performance_analytics(
         SELECT
             c.id AS campaign_pk,
             COUNT(pe.id) AS purchases,
-            COALESCE(SUM({json_val_expr}), 0.0) AS revenue
+            COALESCE(SUM({json_val_expr}), 0.0) AS revenue,
+            MAX({json_currency_expr}) AS revenue_currency
         FROM pending_events pe
         JOIN ad_campaigns c ON ({json_camp_id_expr}) = c.external_campaign_id
         JOIN ad_accounts a ON c.ad_account_id = a.id
+        JOIN campaign_identity ci ON c.external_campaign_id = ci.external_campaign_id
         WHERE pe.client_id = :client_id
           AND a.client_id = :client_id
-          AND ({json_platform_expr} IS NULL OR {json_platform_expr} = c.platform)
+          AND ({json_platform_expr} = c.platform OR ({json_platform_expr} IS NULL AND ci.platform_count = 1))
           AND pe.status IN ('pending', 'cancelled', 'expired', 'courier_booked', 'courier_booking_queued')
           AND {tz_pending_expr} BETWEEN :start_date AND :end_date
         GROUP BY c.id
@@ -919,9 +939,10 @@ async def ad_performance_analytics(
         FROM event_logs el
         JOIN ad_campaigns c ON el.ad_campaign_id = c.external_campaign_id
         JOIN ad_accounts a ON c.ad_account_id = a.id
+        JOIN campaign_identity ci ON c.external_campaign_id = ci.external_campaign_id
         WHERE el.client_id = :client_id
           AND a.client_id = :client_id
-          AND (el.ad_platform IS NULL OR el.ad_platform = c.platform)
+          AND (el.ad_platform = c.platform OR (el.ad_platform IS NULL AND ci.platform_count = 1))
           AND {tz_log_expr} BETWEEN :start_date AND :end_date
         GROUP BY c.id
     )
@@ -930,12 +951,14 @@ async def ad_performance_analytics(
         c.name AS campaign_name,
         c.platform,
         COALESCE(p.total_spend, 0.0) AS spend,
+        COALESCE(p.spend_currency, a.account_currency, '') AS spend_currency,
         COALESCE(p.total_clicks, 0) AS clicks,
         COALESCE(p.total_impressions, 0) AS impressions,
 
         -- Confirmed metrics
         COALESCE(sc.purchases, 0) AS confirmed_purchases,
         COALESCE(sc.revenue, 0.0) AS confirmed_revenue,
+        COALESCE(sc.revenue_currency, sh.revenue_currency, '') AS revenue_currency,
 
         -- Placed metrics = Confirmed + Held
         (COALESCE(sc.purchases, 0) + COALESCE(sh.purchases, 0)) AS placed_purchases,
@@ -973,6 +996,7 @@ async def ad_performance_analytics(
     data = []
     for r in rows:
         spend = float(r.spend or 0.0)
+        spend_currency = getattr(r, "spend_currency", "") or ""
         clicks = int(r.clicks or 0)
         impressions = int(r.impressions or 0)
 
@@ -986,6 +1010,7 @@ async def ad_performance_analytics(
 
         confirmed_purchases = int(r.confirmed_purchases or 0)
         confirmed_revenue = float(r.confirmed_revenue or 0.0)
+        revenue_currency = getattr(r, "revenue_currency", "") or ""
         confirmed_roas = round((confirmed_revenue / spend) if spend > 0 else 0.0, 2)
         confirmed_cpa = round((spend / confirmed_purchases) if confirmed_purchases > 0 else 0.0, 2)
 
@@ -1003,6 +1028,7 @@ async def ad_performance_analytics(
                 campaign_name=r.campaign_name,
                 platform=r.platform,
                 spend=spend,
+                spend_currency=spend_currency,
                 clicks=clicks,
                 impressions=impressions,
                 ctr=ctr,
@@ -1013,6 +1039,7 @@ async def ad_performance_analytics(
                 placed_cpa=placed_cpa,
                 confirmed_purchases=confirmed_purchases,
                 confirmed_revenue=confirmed_revenue,
+                revenue_currency=revenue_currency,
                 confirmed_roas=confirmed_roas,
                 confirmed_cpa=confirmed_cpa,
                 browser_page_views=browser_page_views,
@@ -1024,5 +1051,6 @@ async def ad_performance_analytics(
     return AdPerformanceResponse(
         status="success",
         period_days=days,
+        sync_enabled=os.getenv("ENABLE_AD_SYNC", "").lower() in ("true", "1", "yes"),
         data=data
     )

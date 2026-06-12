@@ -244,6 +244,8 @@ async def test_ad_performance_query_scopes_campaign_aggregates():
     assert response.status == "success"
     assert "c.id AS campaign_pk" in query
     assert "a.client_id = :client_id" in query
-    assert "el.ad_platform IS NULL OR el.ad_platform = c.platform" in query
+    assert "campaign_identity AS" in query
+    assert "SUM(el.event_count)" in query
+    assert "el.ad_platform = c.platform OR (el.ad_platform IS NULL AND ci.platform_count = 1)" in query
     assert "c.id = sc.campaign_pk" in query
     assert "c.platform = p.platform" in query

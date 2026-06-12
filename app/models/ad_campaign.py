@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -14,3 +14,7 @@ class AdCampaign(Base):
     objective = Column(String(50), nullable=True)                     # CONVERSIONS, CLICKS, etc.
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("ad_account_id", "external_campaign_id", name="uq_ad_campaign_account_external"),
+    )
