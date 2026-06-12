@@ -84,6 +84,16 @@ def _verify_wc_signature(raw_body: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def _woocommerce_status_meets_threshold(received_status: str, configured_status: str) -> bool:
+    received = str(received_status or "").strip().lower().replace("wc-", "")
+    configured = str(configured_status or "completed").strip().lower().replace("wc-", "")
+    if configured not in {"completed", "processing"}:
+        configured = "completed"
+    accepted = {"completed"} if configured == "completed" else {"processing", "completed"}
+    accepted.update({"courier_booked", "courier-booked"})
+    return received in accepted
+
+
 def _verify_shopify_signature(raw_body: bytes, signature: str, secret: str) -> bool:
     """Verify Shopify X-Shopify-Hmac-Sha256 (base64 HMAC-SHA256)."""
     if not signature or not secret:
@@ -178,7 +188,8 @@ async def woocommerce_webhook(
 
     # ─── Only process completed/processing/courier_booked orders ──────
     status_clean = status.lower().replace("wc-", "")
-    if status_clean not in ("completed", "processing", "courier_booked", "courier-booked"):
+    configured_status = str(getattr(client, "auto_confirm_status", "completed") or "completed").strip().lower().replace("wc-", "")
+    if not _woocommerce_status_meets_threshold(status_clean, configured_status):
         return {
             "status": "ignored",
             "message": f"Order #{order_id} status '{status}' — no action needed",

@@ -10,6 +10,7 @@ os.environ.setdefault("ENCRYPTION_KEY", "ZFhnf1szwemka8kBbH9jPTC7oKBRTEv0EqWt1J8
 
 from app.routers.client_health import ClientSetupRequest, client_update_setup
 from app.routers.deferred_events import BulkConfirmRequest, ConfirmRequest
+from app.routers.webhook import _woocommerce_status_meets_threshold
 from app.security import decrypt_token
 
 
@@ -36,6 +37,15 @@ class _FakeDb:
 def test_deferred_confirm_requests_normalize_order_ids():
     assert ConfirmRequest(order_id="  1001  ").order_id == "1001"
     assert BulkConfirmRequest(order_ids=[" 1001 ", "1001", "", "1002"]).order_ids == ["1001", "1002"]
+
+
+def test_woocommerce_confirmation_status_respects_configured_threshold():
+    assert _woocommerce_status_meets_threshold("completed", "completed") is True
+    assert _woocommerce_status_meets_threshold("processing", "completed") is False
+    assert _woocommerce_status_meets_threshold("processing", "processing") is True
+    assert _woocommerce_status_meets_threshold("completed", "processing") is True
+    assert _woocommerce_status_meets_threshold("courier-booked", "completed") is True
+    assert _woocommerce_status_meets_threshold("processing", "invalid") is False
 
 
 @pytest.mark.anyio

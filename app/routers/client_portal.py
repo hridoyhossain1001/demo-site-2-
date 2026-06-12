@@ -434,7 +434,12 @@ async def client_settings_update(
 
     # Update COD Auto-Confirm Settings
     client.auto_confirm_days = min(max(0, auto_confirm_days), 7) if growth_enabled else 0
-    client.auto_confirm_status = auto_confirm_status.strip() or "completed"
+    requested_auto_confirm_status = auto_confirm_status.strip().lower().removeprefix("wc-")
+    client.auto_confirm_status = (
+        requested_auto_confirm_status
+        if requested_auto_confirm_status in {"completed", "processing"}
+        else "completed"
+    )
 
     client.tiktok_test_event_code = tiktok_test_event_code.strip() if tiktok_test_event_code and tiktok_test_event_code.strip() else None
 

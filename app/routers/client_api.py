@@ -1869,7 +1869,8 @@ async def save_deferred_settings(
     growth_enabled = has_growth_access(client)
     client.deferred_purchase = growth_enabled and payload.deferredEnabled
     client.auto_confirm_days = min(max(0, payload.autoConfirmDays), 7) if growth_enabled else 0
-    client.auto_confirm_status = payload.autoConfirmStatus.strip() or "completed"
+    requested_status = payload.autoConfirmStatus.strip().lower().replace("wc-", "")
+    client.auto_confirm_status = requested_status if requested_status in {"completed", "processing"} else "completed"
 
     await db.commit()
 

@@ -107,6 +107,8 @@ async def expire_old_pending_events():
                                 async with db.begin_nested():
                                     await _queue_confirmed_event(cached_client, pe, db)
                                     pe.status = "confirmed"
+                                    pe.portal_state = "confirmed"
+                                    pe.is_confirmed = True
                                     pe.confirmed_at = datetime.now(timezone.utc)
                                 confirmed_count += 1
                             except Exception as ex:

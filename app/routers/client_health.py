@@ -516,7 +516,8 @@ async def client_update_setup(
     if payload.auto_confirm_days is not None:
         c.auto_confirm_days = min(max(0, payload.auto_confirm_days), 7) if growth_enabled else 0
     if payload.auto_confirm_status is not None:
-        c.auto_confirm_status = payload.auto_confirm_status.strip() or "completed"
+        requested_status = payload.auto_confirm_status.strip().lower().removeprefix("wc-")
+        c.auto_confirm_status = requested_status if requested_status in {"completed", "processing"} else "completed"
 
     if getattr(c, "trial_started_at", None):
         await require_trial_available(db, domain=c.domain, pixel_id=c.pixel_id, exclude_client_id=c.id)
