@@ -1,0 +1,6 @@
+[submodule "admin-portal"]
+	path = admin-portal
+	url = https://github.com/hridoyhossain1001/buykori-admin-portal.git
+[submodule "client-portal"]
+	path = client-portal
+	url = https://github.com/hridoyhossain1001/buykori-client-portal.git

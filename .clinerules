@@ -19,9 +19,13 @@ Please follow these guidelines automatically whenever making changes to this cod
 ---
 
 ## 3. Server Deployments (DigitalOcean Droplet - Backend & Migrations)
-* To deploy python backend code (`app/`), database migrations (`migrations/`), and static assets to the live DigitalOcean Droplet, you **MUST** run:
-  ```powershell
-  python scratch/deploy_updates.py
-  ```
-  from the workspace root. This syncs changes, applies PostgreSQL migrations, and restarts the web/worker services. 
-* Do **NOT** assume pushing to the root `full-project-` repository deploys backend changes. Backend deployment is strictly done via this command.
+* Backend code updates (`app/`, `migrations/`, etc.) must **ONLY** be deployed directly to the VPS / DigitalOcean droplet using `changed_deploy.py`.
+* **NEVER** push or commit the root repository (`Server site traking` / `demo-site-2-`) to GitHub. Backend code is strictly private and must not go to GitHub.
+
+---
+
+## 4. GitHub Push Constraint
+* If the user asks to "send/push code to GitHub", this **ONLY** applies to:
+  - `client-portal` (Client End repository)
+  - `admin-portal` (Admin End repository)
+* Do **NOT** push backend code or the root workspace repository to GitHub under any circumstances.

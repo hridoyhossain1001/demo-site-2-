@@ -19,18 +19,14 @@ Please follow these guidelines automatically whenever making changes to this cod
 ---
 
 ## 3. Server Deployments (DigitalOcean Droplet - Backend & Migrations)
-* Backend deployment is not triggered by pushing the root repository.
-* Deploy credentials must never be stored in this file or in git.
-* Required deploy environment values are `DO_SSH_HOST`, `DO_SSH_USER`, and `DO_REMOTE_DIR`.
-* Prefer SSH key auth with a pinned `DO_SSH_KNOWN_HOSTS` file and a least-privilege deploy user.
-* Password and root deploys are blocked by default in `deploy/changed_deploy.py`; only use temporary override flags during a controlled migration window.
+* Backend code updates (`app/`, `migrations/`, etc.) must **ONLY** be deployed directly to the VPS / DigitalOcean droplet using `changed_deploy.py`.
+* **NEVER** push or commit the root repository (`Server site traking` / `demo-site-2-` / `just-demo-file-`) to GitHub. Backend code is strictly private and must not go to GitHub.
 
 ---
 
-## 4. Strict Rule - Do Not Push Portal Source To Main Backup Repo
-* The main backup repository (`just-demo-file-` / `full-project-`) must **NEVER** receive raw source code from `client-portal/src/`, `admin-portal/`, or `marketing-site/` unless the user explicitly says: **"push to the backup repo"**.
-* When client-portal code changes, push only to:
-  - `buykori-client-portal` repo for Vercel auto-deploy via `git push` inside `client-portal/`
-  - DigitalOcean for static fallback deploy after the local build/sync step
-* The root repo push (`just-demo-file-`) is only for backend files such as `app/`, `migrations/`, `scripts/`, and `wordpress-plugin/`.
-* Never auto-push `client-portal/` source to the backup root repo without explicit user instruction.
+## 4. GitHub Push Constraints (Frontend Only)
+* If the user asks to "send/push code to GitHub", this **ONLY** applies to:
+  - `client-portal` (Client End repository)
+  - `admin-portal` (Admin End repository)
+* Do **NOT** push backend code or the root workspace repository to GitHub under any circumstances.
+* Root repository pushes are completely disabled. Keep backend updates private on the DO Droplet VPS.
