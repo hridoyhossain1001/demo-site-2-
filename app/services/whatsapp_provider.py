@@ -30,9 +30,15 @@ class EvolutionWhatsAppProvider:
         endpoint = f"{url}/message/sendText/{instance_name}"
 
         # Normalize phone number to only digits
-        cleaned_number = re.sub(r"\D", "", to_number)
+        cleaned_number = re.sub(r"\D", "", to_number or "")
         if not cleaned_number:
             raise ValueError(f"Invalid phone number format for WhatsApp destination: {to_number}")
+
+        # Auto-prefix Bangladesh country code if missing
+        if len(cleaned_number) == 11 and cleaned_number.startswith("01"):
+            cleaned_number = "88" + cleaned_number
+        elif len(cleaned_number) == 10 and cleaned_number.startswith("1"):
+            cleaned_number = "880" + cleaned_number
 
         headers = {
             "apikey": key,

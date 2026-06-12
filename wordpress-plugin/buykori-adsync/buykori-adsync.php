@@ -3,7 +3,7 @@
  * Plugin Name:       Buykori AdSync — Server-Side Tracking
  * Plugin URI:        https://buykori.app/
  * Description:       Server-Side Facebook CAPI, TikTok, and GA4 tracking for WooCommerce with one-page landing support, SHA-256 PII hashing, and deferred purchase control.
- * Version:           1.2.49
+ * Version:           1.2.51
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Buykori AdSync
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 // ─── Plugin Constants ──────────────────────────────────────────────────────────
-define('BUYKORIGW_VERSION', '1.2.49');
+define('BUYKORIGW_VERSION', '1.2.51');
 define('BUYKORIGW_OPTIONAL_EVENTS_POLICY_VERSION', '1.2.33');
 
 define('BUYKORIGW_PLUGIN_FILE', __FILE__);
@@ -1413,7 +1413,7 @@ function buykorigw_bypass_rest_cookie_error($errors) {
     return $errors;
 }
 
-function buykorigw_forward_incomplete_checkout($path, $payload, $blocking = true)
+function buykorigw_forward_incomplete_checkout($path, $payload, $blocking = true, &$response_body = null)
 {
     $settings = buykorigw_get_settings();
     if (empty($settings['api_key']) || empty($settings['gateway_url'])) {
@@ -1441,6 +1441,7 @@ function buykorigw_forward_incomplete_checkout($path, $payload, $blocking = true
         return true;
     }
 
+    $response_body = json_decode(wp_remote_retrieve_body($response), true);
     return wp_remote_retrieve_response_code($response) >= 200
         && wp_remote_retrieve_response_code($response) < 300;
 }
@@ -1502,11 +1503,27 @@ function buykorigw_rest_capture_incomplete_checkout(WP_REST_Request $request)
         if (!is_array($item)) {
             continue;
         }
+        $attributes = array();
+        if (!empty($item['attributes']) && is_array($item['attributes'])) {
+            foreach ($item['attributes'] as $attr_key => $attr_value) {
+                $clean_key = sanitize_text_field((string) $attr_key);
+                $clean_val = sanitize_text_field((string) $attr_value);
+                if ($clean_key !== '' && $clean_val !== '') {
+                    $attributes[$clean_key] = $clean_val;
+                }
+            }
+        }
+
         $products[] = array(
-            'id'       => sanitize_text_field((string) ($item['id'] ?? ($item['content_id'] ?? ''))),
-            'name'     => sanitize_text_field((string) ($item['content_name'] ?? ($item['name'] ?? ''))),
-            'quantity' => max(1, (int) ($item['quantity'] ?? 1)),
-            'price'    => buykorigw_parse_amount($item['item_price'] ?? ($item['price'] ?? 0)),
+            'id'               => sanitize_text_field((string) ($item['id'] ?? ($item['content_id'] ?? ''))),
+            'content_id'       => sanitize_text_field((string) ($item['content_id'] ?? ($item['id'] ?? ''))),
+            'name'             => sanitize_text_field((string) ($item['content_name'] ?? ($item['name'] ?? ''))),
+            'content_name'     => sanitize_text_field((string) ($item['content_name'] ?? ($item['name'] ?? ''))),
+            'category'         => sanitize_text_field((string) ($item['content_category'] ?? ($item['category'] ?? ''))),
+            'content_category' => sanitize_text_field((string) ($item['content_category'] ?? ($item['category'] ?? ''))),
+            'attributes'       => $attributes,
+            'quantity'         => max(1, (int) ($item['quantity'] ?? 1)),
+            'price'            => buykorigw_parse_amount($item['item_price'] ?? ($item['price'] ?? 0)),
         );
     }
 
@@ -1544,7 +1561,12 @@ function buykorigw_convert_incomplete_checkout($order)
         'phone'      => $phone,
         'order_id'   => (string) $order->get_id(),
     );
-    return buykorigw_forward_incomplete_checkout('/incomplete-checkouts/convert', $payload, false);
+    // Confirm the API accepted the conversion before marking the WooCommerce
+    // order as recovered. A non-blocking request can be dropped by the host
+    // while still appearing successful locally.
+    $response_body = null;
+    $accepted = buykorigw_forward_incomplete_checkout('/incomplete-checkouts/convert', $payload, true, $response_body);
+    return $accepted && is_array($response_body) && !empty($response_body['converted']);
 }
 
 function buykorigw_rest_same_origin_allowed()

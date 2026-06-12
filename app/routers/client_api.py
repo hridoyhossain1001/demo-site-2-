@@ -1,7 +1,7 @@
 import logging
 import secrets
 from datetime import datetime, timezone, timedelta
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Request, Response, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, update, desc, cast, Numeric, String
@@ -52,8 +52,9 @@ from app.utils.plugin_connect import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+PRODUCT_GUIDE_DISMISSED_KEY = "__product_guide_dismissed__"
 
-# ─── Auth Dependency ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Auth Dependency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async def get_current_portal_client(request: Request, db: AsyncSession = Depends(get_db)) -> Client:
     require_allowed_origin(request)
     client = await get_client_from_portal_session(request, db)
@@ -65,7 +66,7 @@ async def get_current_portal_client(request: Request, db: AsyncSession = Depends
         clear_client_cache(client.api_key)
     return client
 
-# ─── Schemas ─────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class ProfileUpdateRequest(BaseModel):
     name: str
     email: str | None = None
@@ -103,6 +104,23 @@ class SidebarSeenRequest(BaseModel):
 
 class IncompleteCheckoutStatusRequest(BaseModel):
     status: str
+
+class ManualRecoveryOrderItem(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    content_id: str | None = Field(default=None, max_length=255)
+    quantity: int = Field(default=1, ge=1, le=999)
+    price: float = Field(default=0, ge=0, le=100000000)
+    attributes: dict[str, str] = Field(default_factory=dict)
+    category: str | None = Field(default=None, max_length=255)
+
+class ManualRecoveryOrderRequest(BaseModel):
+    customer_name: str = Field(min_length=1, max_length=255)
+    phone: str = Field(min_length=8, max_length=32)
+    address: str = Field(min_length=5, max_length=500)
+    items: list[ManualRecoveryOrderItem] = Field(min_length=1, max_length=30)
+    delivery_charge: float = Field(default=0, ge=0, le=100000000)
+    discount: float = Field(default=0, ge=0, le=100000000)
+    note: str | None = Field(default=None, max_length=500)
 
 
 class PluginConnectAuthorizeRequest(BaseModel):
@@ -181,9 +199,34 @@ def _validate_rules(rules: list[dict]) -> list[dict]:
 
 
 async def _refresh_incomplete_checkout_states(db: AsyncSession, client_id: int) -> None:
+    from app.routers.incomplete_checkouts import recover_open_checkouts_for_order
+
     now = datetime.now(timezone.utc)
     inactive_before = now - timedelta(minutes=20)
     expire_before = now - timedelta(days=30)
+
+    pending_result = await db.execute(
+        select(PendingEvent).where(
+            PendingEvent.client_id == client_id,
+            PendingEvent.status == "pending",
+        )
+    )
+    for pending in pending_result.scalars().all():
+        raw_order_data = pending.raw_order_data if isinstance(pending.raw_order_data, dict) else {}
+        phone = str(
+            raw_order_data.get("recipient_phone")
+            or raw_order_data.get("customer_phone")
+            or raw_order_data.get("billing_phone")
+            or ""
+        ).strip()
+        if phone:
+            await recover_open_checkouts_for_order(
+                db,
+                client_id=client_id,
+                phone=phone,
+                order_id=str(pending.order_id),
+            )
+
     stale_result = await db.execute(
         select(IncompleteCheckout).where(
             IncompleteCheckout.client_id == client_id,
@@ -225,9 +268,9 @@ def _incomplete_checkout_json(row: IncompleteCheckout) -> dict:
     return {
         "id": row.id,
         "phone": row.phone,
-        "customerName": row.customer_name or "—",
-        "email": row.email or "—",
-        "address": row.address or "—",
+        "customerName": row.customer_name or "â€”",
+        "email": row.email or "â€”",
+        "address": row.address or "â€”",
         "products": row.products or [],
         "amount": float(row.amount or 0),
         "currency": row.currency,
@@ -295,6 +338,151 @@ async def update_incomplete_checkout_status(
     await db.commit()
     return {"success": True, "item": _incomplete_checkout_json(draft)}
 
+
+async def _create_manual_recovery_order(
+    db: AsyncSession,
+    *,
+    client: Client,
+    checkout_id: int,
+    payload: ManualRecoveryOrderRequest,
+) -> dict:
+    require_growth_access(client, "Incomplete checkout recovery")
+    result = await db.execute(
+        select(IncompleteCheckout)
+        .where(
+            IncompleteCheckout.id == checkout_id,
+            IncompleteCheckout.client_id == client.id,
+        )
+        .with_for_update()
+    )
+    draft = result.scalar_one_or_none()
+    if not draft:
+        raise HTTPException(status_code=404, detail="Incomplete checkout not found.")
+    if draft.status not in {"incomplete", "contacted"}:
+        raise HTTPException(status_code=400, detail="Only incomplete or contacted leads can be converted to an order.")
+    if draft.order_id:
+        raise HTTPException(status_code=409, detail="This recovery lead already has a linked order.")
+
+    from app.routers.incomplete_checkouts import _normalize_phone
+
+    try:
+        phone = _normalize_phone(payload.phone)
+    except HTTPException as exc:
+        raise HTTPException(status_code=422, detail="A valid customer phone is required.") from exc
+
+    cleaned_items = []
+    content_ids = []
+    total_items = 0
+    subtotal = 0.0
+    for index, item in enumerate(payload.items, start=1):
+        content_id = (item.content_id or f"manual-{checkout_id}-{index}").strip()
+        attributes = {
+            str(key).strip()[:80]: str(value).strip()[:120]
+            for key, value in (item.attributes or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        quantity = int(item.quantity)
+        price = float(item.price or 0)
+        subtotal += price * quantity
+        total_items += quantity
+        content_ids.append(content_id)
+        cleaned_items.append({
+            "id": content_id,
+            "content_id": content_id,
+            "content_type": "product",
+            "title": item.name.strip(),
+            "name": item.name.strip(),
+            "content_name": item.name.strip(),
+            "content_category": (item.category or "").strip(),
+            "attributes": attributes,
+            "quantity": quantity,
+            "price": price,
+            "item_price": price,
+        })
+
+    total_amount = max(0.0, subtotal + float(payload.delivery_charge or 0) - float(payload.discount or 0))
+    now = datetime.now(timezone.utc)
+    order_id = f"manual-{checkout_id}-{int(now.timestamp())}"
+    raw_order_data = {
+        "recipient_name": payload.customer_name.strip(),
+        "recipient_phone": phone,
+        "recipient_address": payload.address.strip(),
+        "cod_amount": total_amount,
+        "products": cleaned_items,
+        "delivery_charge": float(payload.delivery_charge or 0),
+        "discount": float(payload.discount or 0),
+        "note": (payload.note or "").strip(),
+        "source": "incomplete_checkout_manual_recovery",
+        "recovery_checkout_id": checkout_id,
+    }
+    event_data = {
+        "event_name": "Purchase",
+        "event_time": int(now.timestamp()),
+        "event_id": f"manual_recovery_{checkout_id}_{int(now.timestamp())}",
+        "event_source_url": draft.page_url or "",
+        "action_source": "website",
+        "user_data": {},
+        "custom_data": {
+            "value": total_amount,
+            "currency": draft.currency or "BDT",
+            "content_ids": content_ids,
+            "contents": cleaned_items,
+            "content_type": "product",
+            "num_items": total_items,
+            "order_id": order_id,
+            "trigger_reason": "manual_incomplete_checkout_recovery",
+        },
+        "raw_order_data": raw_order_data,
+    }
+
+    pending = PendingEvent(
+        client_id=client.id,
+        order_id=order_id,
+        event_data=event_data,
+        raw_order_data=raw_order_data,
+        status="pending",
+        portal_state="manual_recovery",
+    )
+    db.add(pending)
+
+    draft.status = "recovered"
+    draft.order_id = order_id
+    draft.converted_at = now
+    draft.last_activity_at = now
+    draft.customer_name = payload.customer_name.strip()
+    draft.phone = phone
+    draft.address = payload.address.strip()
+    draft.amount = total_amount
+    draft.products = cleaned_items
+
+    from app.services.notification_service import create_purchase_whatsapp_job
+
+    await create_purchase_whatsapp_job(db, client, event_data)
+    await db.commit()
+    await db.refresh(pending)
+    return {
+        "success": True,
+        "orderId": order_id,
+        "pendingEventId": pending.id,
+        "checkoutId": draft.id,
+        "status": draft.status,
+    }
+
+
+@router.post("/incomplete-checkouts/{checkout_id}/create-order")
+async def create_order_from_incomplete_checkout(
+    checkout_id: int,
+    payload: ManualRecoveryOrderRequest,
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _create_manual_recovery_order(
+        db,
+        client=client,
+        checkout_id=checkout_id,
+        payload=payload,
+    )
+
 # --- Sidebar Notification State ---
 @router.get("/sidebar/status")
 async def get_sidebar_status(
@@ -361,7 +549,7 @@ async def mark_sidebar_seen(
     await db.commit()
     return {"success": True, "seenState": seen_state}
 
-# ─── Profile & Usage Stats ───────────────────────────────────────────────────
+# â”€â”€â”€ Profile & Usage Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/profile")
 async def get_profile(
     request: Request,
@@ -394,7 +582,7 @@ async def get_profile(
     except Exception as redis_err:
         logger.warning(f"[profile] Redis usage read failed: {redis_err}")
 
-    # Use the higher of DB or Redis — whichever is more up-to-date
+    # Use the higher of DB or Redis â€” whichever is more up-to-date
     events_used = max(db_events_used, redis_events_used)
     plan = plan_summary(client, now)
     events_quota = plan["eventsQuota"]
@@ -426,7 +614,8 @@ async def get_profile(
         "eventsUsed": events_used,
         "eventsQuota": events_quota,
         "ownerNotifyWhatsapp": client.owner_notify_whatsapp,
-        "ownerWhatsappNumber": client.owner_whatsapp_number or ""
+        "ownerWhatsappNumber": client.owner_whatsapp_number or "",
+        "guideDismissed": PRODUCT_GUIDE_DISMISSED_KEY in set(client.dismissed_suggestions or []),
     }
 
 @router.post("/profile")
@@ -460,15 +649,7 @@ async def update_profile(
     if payload.ownerNotifyWhatsapp is not None:
         client.owner_notify_whatsapp = payload.ownerNotifyWhatsapp
         if payload.ownerNotifyWhatsapp:
-            from app.models.whatsapp_instance import WhatsAppInstance
-            res = await db.execute(
-                select(WhatsAppInstance).where(WhatsAppInstance.status == "active").order_by(WhatsAppInstance.id)
-            )
-            active_inst = res.scalars().first()
-            if active_inst:
-                client.whatsapp_instance_id = active_inst.id
-            else:
-                logger.warning(f"No active WhatsAppInstance found to link to client {client.id}")
+            await _assign_active_whatsapp_instance(client, db)
         else:
             client.whatsapp_instance_id = None
 
@@ -511,8 +692,22 @@ async def update_profile(
         "eventsUsed": events_used,
         "eventsQuota": events_quota,
         "ownerNotifyWhatsapp": client.owner_notify_whatsapp,
-        "ownerWhatsappNumber": client.owner_whatsapp_number or ""
+        "ownerWhatsappNumber": client.owner_whatsapp_number or "",
+        "guideDismissed": PRODUCT_GUIDE_DISMISSED_KEY in set(client.dismissed_suggestions or []),
     }}
+
+
+@router.post("/guide/dismiss")
+async def dismiss_product_guide(
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db),
+):
+    dismissed = list(client.dismissed_suggestions or [])
+    if PRODUCT_GUIDE_DISMISSED_KEY not in dismissed:
+        dismissed.append(PRODUCT_GUIDE_DISMISSED_KEY)
+        client.dismissed_suggestions = dismissed
+        await db.commit()
+    return {"success": True, "guideDismissed": True}
 
 @router.post("/account/password")
 async def update_account_password(
@@ -552,7 +747,7 @@ async def update_account_password(
 async def reset_demo(client: Client = Depends(get_current_portal_client)):
     return {"success": True}
 
-# ─── WordPress Connection Status ─────────────────────────────────────────────
+# â”€â”€â”€ WordPress Connection Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/connection")
 async def get_connection(client: Client = Depends(get_current_portal_client)):
     return {
@@ -605,7 +800,7 @@ async def revoke_wp_token(
         }
     }
 
-# ─── Platform Credentials ────────────────────────────────────────────────────
+# â”€â”€â”€ Platform Credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/plugin-connect/authorize")
 async def authorize_plugin_connect(
     request: Request,
@@ -778,7 +973,7 @@ async def update_credentials(
         }
     }
 
-# ─── Event Routing Rules ─────────────────────────────────────────────────────
+# â”€â”€â”€ Event Routing Rules â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Note: Event routing rules are stored in the client.event_rules column.
 # If not set, we default based on client's globally enabled platforms.
 @router.get("/rules")
@@ -808,7 +1003,7 @@ async def update_rules(
 
     return {"success": True, "rules": client.event_rules}
 
-# ─── Telemetry Logs ───────────────────────────────────────────────────────────
+# â”€â”€â”€ Telemetry Logs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/events")
 async def get_events(
     client: Client = Depends(get_current_portal_client),
@@ -1018,6 +1213,49 @@ async def get_events_trend(
         })
         
     return {"trend": trend}
+
+
+@router.get("/events/recovery-summary")
+async def get_events_recovery_summary(
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db),
+    days: int = Query(7, ge=1, le=90)
+):
+    """Return deduplicated browser/server coverage using shared event IDs."""
+    start_date = datetime.now(timezone.utc) - timedelta(days=days)
+    result = await db.execute(
+        select(EventLog.event_id, EventLog.event_name, EventLog.status)
+        .where(
+            and_(
+                EventLog.client_id == client.id,
+                EventLog.created_at >= start_date,
+                EventLog.event_id.is_not(None),
+            )
+        )
+    )
+
+    browser_ids = set()
+    server_ids = set()
+    for event_id, event_name, status in result.all():
+        if not event_id:
+            continue
+        raw_name = str(event_name or "").lower()
+        if raw_name.startswith("browsertiktok:") or str(status or "").lower() == "fired":
+            browser_ids.add(event_id)
+        elif str(status or "").lower() == "success":
+            server_ids.add(event_id)
+
+    recovered_ids = server_ids - browser_ids
+    recovery_rate = round((len(recovered_ids) / len(server_ids)) * 100, 1) if server_ids else 0.0
+    return {
+        "days": days,
+        "browser_events": len(browser_ids),
+        "server_events": len(server_ids),
+        "matched_events": len(server_ids & browser_ids),
+        "recovered_events": len(recovered_ids),
+        "recovery_rate": recovery_rate,
+    }
+
 
 @router.get("/api-logs")
 async def get_api_logs(
@@ -1243,7 +1481,7 @@ async def get_live_stream_pulse(
         }
     }
 
-# ─── Interactive Suggestions (Bypassing Gemini using Rule-Engine) ───────────
+# â”€â”€â”€ Interactive Suggestions (Bypassing Gemini using Rule-Engine) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/suggestions")
 async def get_suggestions(client: Client = Depends(get_current_portal_client)):
     dismissed = set(getattr(client, 'dismissed_suggestions', None) or [])
@@ -1267,7 +1505,7 @@ async def get_suggestions(client: Client = Depends(get_current_portal_client)):
             "title": "Activate Deferred Purchases (COD Protection)",
             "severity": "Critical",
             "explanation": "Your store receives Cash-on-Delivery orders, but Deferred Purchase tracking is currently inactive. This means fake, gibberish, or canceled COD checkouts are immediately training the Facebook Pixel, raising acquisition costs.",
-            "fixAction": "1. Navigate to Settings > Domain & Facebook CAPI.\n2. Check the box '📦 Deferred Purchase (COD Protection) ON'.\n3. Save config to hold pending orders.",
+            "fixAction": "1. Navigate to Settings > Domain & Facebook CAPI.\n2. Check the box 'ðŸ“¦ Deferred Purchase (COD Protection) ON'.\n3. Save config to hold pending orders.",
             "resolved": False,
             "platform": "Meta CAPI"
         })
@@ -1296,10 +1534,13 @@ async def get_suggestions(client: Client = Depends(get_current_portal_client)):
 
     # Filter dismissed suggestions, mark resolved ones
     filtered = []
+    seen_suggestion_ids = set()
     for s in recommendations:
-        if s["id"] in dismissed:
+        suggestion_id = s["id"]
+        if suggestion_id in dismissed or suggestion_id in seen_suggestion_ids:
             continue
-        if s["id"] in resolved:
+        seen_suggestion_ids.add(suggestion_id)
+        if suggestion_id in resolved:
             s["resolved"] = True
         filtered.append(s)
 
@@ -1324,7 +1565,7 @@ async def toggle_resolve_suggestion(
         await db.commit()
     except Exception:
         await db.rollback()  # Rollback transaction to prevent session corruption
-        logger.warning("resolved_suggestions column may not exist yet — gracefully degraded.")
+        logger.warning("resolved_suggestions column may not exist yet â€” gracefully degraded.")
     return {"success": True}
 
 @router.post("/suggestions/dismiss")
@@ -1341,7 +1582,7 @@ async def dismiss_suggestion(
         await db.commit()
     except Exception:
         await db.rollback()  # Rollback transaction to prevent session corruption
-        logger.warning("dismissed_suggestions column may not exist yet — gracefully degraded.")
+        logger.warning("dismissed_suggestions column may not exist yet â€” gracefully degraded.")
     return {"success": True}
 
 @router.post("/suggestions/ai-review")
@@ -1356,7 +1597,7 @@ async def run_diagnostics_scan(
         "suggestions": suggestions
     }
 
-# ─── Sandbox Event Generator ─────────────────────────────────────────────────
+# â”€â”€â”€ Sandbox Event Generator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/campaign-test")
 async def run_sandbox_campaign_test(
     payload: CampaignTestRequest,
@@ -1414,7 +1655,7 @@ async def run_sandbox_campaign_test(
         }
     }
 
-# ─── COD Protection (Deferred Purchase Tracking) ─────────────────────────────
+# â”€â”€â”€ COD Protection (Deferred Purchase Tracking) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class DeferredConfirmRequest(BaseModel):
     order_id: str
 
@@ -1498,14 +1739,25 @@ async def get_deferred_purchases(
         age_sec = (now_utc - created).total_seconds()
         age_h = round(age_sec / 3600, 1)
 
-        # Real (unmasked) PII — merchants need this to call and verify COD orders
+        def _raw_value(*keys: str) -> str:
+            for key in keys:
+                value = raw_order_data.get(key)
+                if value is not None and str(value).strip() and str(value).strip() != "â€”":
+                    return str(value).strip()
+            return ""
+
+        # Real (unmasked) PII â€” merchants need this to call and verify COD orders.
+        # Fall back to hashed user_data only when WooCommerce raw order fields are unavailable.
         ud = ed.get("user_data", {}) or {}
         raw_phone_list = ud.get("ph", [])
         raw_email_list = ud.get("em", [])
-        customer_str = "—"
-        if raw_phone_list and raw_phone_list[0] and raw_phone_list[0] != "—":
+        recipient_name = _raw_value("recipient_name", "customer_name", "name", "billing_name")
+        recipient_phone = _raw_value("recipient_phone", "customer_phone", "phone", "billing_phone")
+        recipient_address = _raw_value("recipient_address", "customer_address", "address", "billing_address")
+        customer_str = recipient_phone or "â€”"
+        if customer_str == "â€”" and raw_phone_list and raw_phone_list[0] and raw_phone_list[0] != "â€”":
             customer_str = str(raw_phone_list[0])
-        elif raw_email_list and raw_email_list[0] and raw_email_list[0] != "—":
+        elif customer_str == "â€”" and raw_email_list and raw_email_list[0] and raw_email_list[0] != "â€”":
             customer_str = str(raw_email_list[0])
 
         # Parse product list from custom_data.contents
@@ -1521,6 +1773,8 @@ async def get_deferred_purchases(
                     display_name = raw_name if raw_name and raw_name != item_id else f"Product #{item_id}" if item_id else "Unknown Product"
                     products.append({
                         "name": display_name,
+                        "category": item.get("content_category") or item.get("category") or "",
+                        "attributes": item.get("attributes") or {},
                         "quantity": int(item.get("quantity") or item.get("qty") or 1),
                         "price": float(item.get("item_price") or item.get("price") or 0),
                     })
@@ -1535,6 +1789,8 @@ async def get_deferred_purchases(
                         display_name = raw_name if raw_name else f"Product #{item_id}" if item_id else "Unknown Product"
                         products.append({
                             "name": display_name,
+                            "category": item.get("content_category") or item.get("category") or "",
+                            "attributes": item.get("attributes") or {},
                             "quantity": int(item.get("quantity") or 1),
                             "price": float(item.get("subtotal") or item.get("price") or 0),
                         })
@@ -1552,10 +1808,14 @@ async def get_deferred_purchases(
             "operationsOnly": pe.portal_state == "operations_only",
             "amount": custom_data.get("value", 0),
             "customer": customer_str,
-            # Real recipient info (unmasked) from raw courier payload
-            "recipientName": raw_order_data.get("recipient_name") or "—",
-            "recipientPhone": raw_order_data.get("recipient_phone") or customer_str,
-            "recipientAddress": raw_order_data.get("recipient_address") or "—",
+            # Real recipient info (unmasked) from raw courier payload. Include both
+            # recipient* and customer* aliases because portal views use both shapes.
+            "recipientName": recipient_name or "â€”",
+            "recipientPhone": recipient_phone or customer_str,
+            "recipientAddress": recipient_address or "â€”",
+            "customerName": recipient_name or "",
+            "phone": recipient_phone or customer_str,
+            "address": recipient_address or "",
             # Product list
             "products": products,
             "fraudScore": pe.fraud_score or 0,
@@ -1571,21 +1831,30 @@ async def get_deferred_purchases(
         default=0.0,
     )
 
+    pending_value_display = f"৳{deferred_pending_value:,.0f}" if deferred_pending_value else "৳0"
+    operations_value_display = f"৳{pending_value:,.0f}" if pending_value else "৳0"
+    deferred_oldest_display = f"{deferred_oldest_age_hours}h" if deferred_oldest_age_hours else "-"
+    operations_oldest_display = f"{oldest_age_hours}h" if oldest_age_hours else "-"
+
     return {
         "deferredEnabled": bool(client.deferred_purchase),
         "autoConfirmDays": min(max(0, getattr(client, "auto_confirm_days", 0)), 7),
         "autoConfirmStatus": str(getattr(client, "auto_confirm_status", "completed")),
-        "pendingCount": pending_count,
-        "pendingValue": f"৳{pending_value:,.0f}" if pending_value else "৳0",
+        "pendingCount": len(deferred_pending_list),
+        "pendingValue": pending_value_display,
         "confirmedTotal": confirmed_total,
         "cancelledTotal": cancelled_total,
         "expiredTotal": expired_total,
         "confirmedToday": confirmed_today,
-        "oldestPending": f"{oldest_age_hours}h" if oldest_age_hours else "—",
-        "pendingList": pending_list,
+        "oldestPending": deferred_oldest_display,
+        "pendingList": deferred_pending_list,
+        "operationsPendingCount": pending_count,
+        "operationsPendingValue": operations_value_display,
+        "operationsOldestPending": operations_oldest_display,
+        "operationsPendingList": pending_list,
         "deferredPendingCount": len(deferred_pending_list),
-        "deferredPendingValue": f"৳{deferred_pending_value:,.0f}" if deferred_pending_value else "৳0",
-        "deferredOldestPending": f"{deferred_oldest_age_hours}h" if deferred_oldest_age_hours else "—",
+        "deferredPendingValue": pending_value_display,
+        "deferredOldestPending": deferred_oldest_display,
         "deferredPendingList": deferred_pending_list,
     }
 
@@ -1665,6 +1934,24 @@ async def api_cancel_deferred(
         logger.error("Deferred cancel failed for client %s order %s: %s", client.id, payload.order_id, e)
         raise HTTPException(status_code=400, detail="Deferred order could not be cancelled.")
 
+
+@router.post("/deferred/restore")
+async def api_restore_deferred(
+    payload: DeferredConfirmRequest,
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db)
+):
+    from app.routers.deferred_events import restore_cancelled_event, CancelRequest
+    try:
+        res = await restore_cancelled_event(CancelRequest(order_id=payload.order_id), client=client, db=db)
+        return {"success": True, "message": res.message}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Deferred restore failed for client %s order %s: %s", client.id, payload.order_id, e)
+        raise HTTPException(status_code=400, detail="Deferred order could not be restored.")
+
+
 @router.post("/deferred/cancel-bulk")
 async def api_cancel_deferred_bulk(
     payload: DeferredBulkConfirmRequest,
@@ -1683,7 +1970,7 @@ async def api_cancel_deferred_bulk(
         raise HTTPException(status_code=400, detail="Deferred orders could not be cancelled.")
 
 
-# ─── Multiple Store Management ────────────────────────────────────────────────
+# â”€â”€â”€ Multiple Store Management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class CreateStoreRequest(BaseModel):
     business_name: str
@@ -1706,7 +1993,7 @@ async def list_stores(
     require_allowed_origin(request)
     user, current_client, _ = await get_client_user_from_cookie(request, db)
 
-    # Find all ClientUser rows for this email → gives us all their stores
+    # Find all ClientUser rows for this email â†’ gives us all their stores
     all_user_rows_r = await db.execute(
         select(ClientUser).where(ClientUser.email == user.email, ClientUser.is_active == True)
     )
@@ -1862,7 +2149,7 @@ async def create_store(
     new_user = ClientUser(
         client_id=new_client.id,
         email=user.email,
-        password_hash=user.password_hash,   # same password — no re-registration needed
+        password_hash=user.password_hash,   # same password â€” no re-registration needed
         full_name=user.full_name,
         role="owner",
         is_active=True,
@@ -1880,12 +2167,26 @@ async def create_store(
     return {"success": True, "user": _user_payload(new_user, new_client)}
 
 
-# ─── Client Notification Settings ──────────────────────────────────────────────
+# â”€â”€â”€ Client Notification Settings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class NotificationSettingsUpdateRequest(BaseModel):
     owner_notify_whatsapp: bool
     owner_whatsapp_number: str | None = None
     whatsapp_instance_id: int | None = None
+
+
+async def _assign_active_whatsapp_instance(client: Client, db: AsyncSession) -> None:
+    from app.models.whatsapp_instance import WhatsAppInstance
+
+    result = await db.execute(
+        select(WhatsAppInstance).where(WhatsAppInstance.status == "active").order_by(WhatsAppInstance.id)
+    )
+    active_instance = result.scalars().first()
+    if active_instance:
+        client.whatsapp_instance_id = active_instance.id
+    else:
+        client.whatsapp_instance_id = None
+        logger.warning("No active WhatsAppInstance found to link to client %s", client.id)
 
 
 @router.get("/client/notification-settings")
@@ -1905,8 +2206,6 @@ async def update_notification_settings(
     client: Client = Depends(get_current_portal_client),
     db: AsyncSession = Depends(get_db),
 ):
-    from app.models.whatsapp_instance import WhatsAppInstance
-
     client.owner_notify_whatsapp = payload.owner_notify_whatsapp
 
     phone = payload.owner_whatsapp_number
@@ -1916,11 +2215,10 @@ async def update_notification_settings(
             phone = None
     client.owner_whatsapp_number = phone
 
-    if payload.whatsapp_instance_id is not None:
-        instance = await db.get(WhatsAppInstance, payload.whatsapp_instance_id)
-        if not instance:
-            raise HTTPException(status_code=400, detail="WhatsApp instance not found.")
-        client.whatsapp_instance_id = payload.whatsapp_instance_id
+    if payload.owner_notify_whatsapp:
+        if not phone:
+            raise HTTPException(status_code=422, detail="Owner WhatsApp number is required.")
+        await _assign_active_whatsapp_instance(client, db)
     else:
         client.whatsapp_instance_id = None
 

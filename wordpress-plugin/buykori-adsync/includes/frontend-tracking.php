@@ -570,10 +570,65 @@ function buykorigw_release_purchase_lock( $order_id ) {
     delete_option( buykorigw_purchase_lock_key( $order_id ) );
 }
 
-add_action( 'woocommerce_thankyou', 'buykorigw_schedule_purchase_sync', 10, 1 );
+add_action( 'woocommerce_thankyou', 'buykorigw_thankyou_immediate_purchase', 10, 1 );
+add_action( 'woocommerce_checkout_order_created', 'buykorigw_checkout_immediate_purchase', 25, 1 );
+add_action( 'woocommerce_checkout_order_processed', 'buykorigw_checkout_immediate_purchase', 25, 1 );
+add_action( 'woocommerce_store_api_checkout_order_processed', 'buykorigw_checkout_immediate_purchase', 25, 1 );
 add_action( 'woocommerce_checkout_order_processed', 'buykorigw_track_deferred_purchase_after_checkout', 30, 1 );
 add_action( 'woocommerce_store_api_checkout_order_processed', 'buykorigw_track_deferred_purchase_after_store_api_checkout', 30, 1 );
 add_action( 'buykorigw_sync_purchase', 'buykorigw_sync_purchase_handler', 10, 1 );
+
+/**
+ * Send the order to AdSync in the same request that creates the WooCommerce order.
+ *
+ * WP-Cron only runs when WordPress receives another request, so it cannot be the
+ * primary delivery path for stores with low traffic. The existing scheduled
+ * action remains as a retry fallback when this immediate call fails.
+ */
+function buykorigw_checkout_immediate_purchase( $order_or_id ) {
+    $order_id = is_object( $order_or_id ) && method_exists( $order_or_id, 'get_id' )
+        ? $order_or_id->get_id()
+        : (int) $order_or_id;
+
+    if ( ! $order_id ) {
+        return;
+    }
+
+    $settings = buykorigw_get_settings();
+    if ( empty( $settings['enable_purchase'] ) || empty( $settings['api_key'] ) ) {
+        return;
+    }
+
+    buykorigw_track_purchase( $order_id );
+}
+
+/**
+ * Synchronous purchase handler for the Thank You page.
+ *
+ * Calls buykorigw_track_purchase() directly during page render so the
+ * CAPI event is delivered before the customer closes the tab. The 10-second
+ * wp_remote_post timeout in buykorigw_send_event() is acceptable here because
+ * the thank-you page is the terminal step of the checkout flow.
+ */
+function buykorigw_thankyou_immediate_purchase( $order_id ) {
+    $order_id = is_object( $order_id ) && method_exists( $order_id, 'get_id' )
+        ? $order_id->get_id()
+        : (int) $order_id;
+
+    if ( ! $order_id ) {
+        return;
+    }
+
+    $settings = buykorigw_get_settings();
+    if ( empty( $settings['enable_purchase'] ) || empty( $settings['api_key'] ) ) {
+        return;
+    }
+
+    // Fire synchronously — buykorigw_track_purchase has its own dedup
+    // guard (_buykorigw_tracked meta + atomic lock) so this is safe even
+    // if the async fallback from checkout_order_processed fires later.
+    buykorigw_track_purchase( $order_id );
+}
 
 function buykorigw_schedule_purchase_sync( $order_or_id ) {
     $order_id = is_object( $order_or_id ) && method_exists( $order_or_id, 'get_id' )
@@ -672,38 +727,12 @@ function buykorigw_track_purchase( $order_id ) {
     }
 
     // Build product IDs and content data
-    $content_ids = array();
-    $contents    = array();
-    $num_items   = 0;
-    $content_format = isset( $settings['content_id_format'] ) ? $settings['content_id_format'] : 'id';
-
-    foreach ( $order->get_items() as $item ) {
-        $product_id = $item->get_product_id();
-        $product    = $item->get_product();
-
-        $final_id = (string) $product_id;
-        if ( $content_format === 'sku' && $product ) {
-            $sku = $product->get_sku();
-            if ( ! empty( $sku ) ) {
-                $final_id = $sku;
-            }
-        }
-
-        $content_ids[] = $final_id;
-
-        // Product name — $item->get_name() returns the product title from WooCommerce
-        $product_name = $item->get_name();
-
-        $contents[] = array(
-            'id'           => $final_id,
-            'content_id'   => $final_id,
-            'content_type' => 'product',
-            'title'        => $product_name,  // Product name — portal এ দেখাবে
-            'name'         => $product_name,  // Fallback key
-            'quantity'     => $item->get_quantity(),
-            'item_price'   => (float) ( $item->get_total() / max( $item->get_quantity(), 1 ) ),
-        );
-        $num_items += $item->get_quantity();
+    if ( function_exists( 'buykorigw_order_contents_payload' ) ) {
+        list( $content_ids, $contents, $num_items ) = buykorigw_order_contents_payload( $order );
+    } else {
+        $content_ids = array();
+        $contents    = array();
+        $num_items   = 0;
     }
 
     // Build user_data with real customer info (hashed)
@@ -816,6 +845,7 @@ function buykorigw_track_purchase( $order_id ) {
                 ) ) )
             ),
             'cod_amount'        => (float) $order->get_total(),
+            'products'          => $contents,
         ),
     );
 

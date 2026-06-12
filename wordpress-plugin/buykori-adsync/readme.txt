@@ -4,9 +4,18 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.49
+Stable tag: 1.2.51
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
+
+== Changelog ==
+
+= 1.2.51 =
+* Adds WooCommerce variation attributes such as color and size to pending COD order details.
+
+= 1.2.50 =
+* Sends WooCommerce orders to Buykori during order creation instead of waiting for traffic-triggered WP-Cron.
+* Confirms incomplete-checkout recovery delivery before marking the order recovered.
 
 Server-Side Facebook CAPI, TikTok, and GA4 tracking for WooCommerce with one-page landing support and deferred purchase control.
 

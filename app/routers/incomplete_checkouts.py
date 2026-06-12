@@ -59,6 +59,64 @@ def _phone_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+async def recover_open_checkouts_for_order(
+    db: AsyncSession,
+    *,
+    client_id: int,
+    phone: str,
+    order_id: str,
+) -> int:
+    """Mark only real abandoned/contacted leads as recovered.
+
+    Drafts still in "active" status mean the customer completed checkout before
+    the 20-minute incomplete threshold, so they are hidden as ignored instead of
+    appearing as recovered leads.
+    """
+    try:
+        phone_hash = _phone_hash(_normalize_phone(phone))
+    except HTTPException:
+        return 0
+
+    result = await db.execute(
+        select(IncompleteCheckout)
+        .where(
+            IncompleteCheckout.client_id == client_id,
+            IncompleteCheckout.phone_hash == phone_hash,
+            IncompleteCheckout.status.in_(["active", "incomplete", "contacted"]),
+        )
+        .order_by(desc(IncompleteCheckout.last_activity_at), desc(IncompleteCheckout.id))
+        .with_for_update()
+    )
+    drafts = result.scalars().all()
+    if not drafts:
+        return 0
+
+    converted_at = datetime.now(timezone.utc)
+    primary_draft = next((draft for draft in drafts if draft.status in {"incomplete", "contacted"}), None)
+    if not primary_draft:
+        for draft in drafts:
+            draft.status = "ignored"
+            draft.order_id = order_id.strip()
+            draft.converted_at = converted_at
+            draft.last_activity_at = converted_at
+        return 0
+
+    primary_draft.status = "recovered"
+    primary_draft.order_id = order_id.strip()
+    primary_draft.converted_at = converted_at
+    primary_draft.last_activity_at = converted_at
+
+    for draft in drafts:
+        if draft.id == primary_draft.id:
+            continue
+        draft.status = "ignored"
+        draft.order_id = order_id.strip()
+        draft.converted_at = converted_at
+        draft.last_activity_at = converted_at
+
+    return 1
+
+
 @router.post("/incomplete-checkouts/upsert")
 async def upsert_incomplete_checkout(
     payload: IncompleteCheckoutUpsert,
@@ -117,24 +175,15 @@ async def convert_incomplete_checkout(
     client: CachedClient = Depends(get_current_client),
     db: AsyncSession = Depends(get_db),
 ):
-    phone_hash = _phone_hash(_normalize_phone(payload.phone))
-    clauses = [
-        IncompleteCheckout.client_id == client.id,
-        IncompleteCheckout.phone_hash == phone_hash,
-        IncompleteCheckout.status.in_(["active", "incomplete", "contacted"]),
-    ]
-    if payload.visitor_id:
-        clauses.append(IncompleteCheckout.visitor_id == payload.visitor_id.strip())
-    result = await db.execute(select(IncompleteCheckout).where(and_(*clauses)).order_by(desc(IncompleteCheckout.last_activity_at)))
-    drafts = result.scalars().all()
-    if not drafts:
-        return {"success": True, "converted": False}
-    converted_at = datetime.now(timezone.utc)
-    order_id = payload.order_id.strip()
-    for draft in drafts:
-        draft.status = "recovered"
-        draft.order_id = order_id
-        draft.converted_at = converted_at
-        draft.last_activity_at = converted_at
+    require_growth_access(client, "Incomplete checkout recovery")
+    converted_count = await recover_open_checkouts_for_order(
+        db,
+        client_id=client.id,
+        phone=payload.phone,
+        order_id=payload.order_id,
+    )
     await db.commit()
-    return {"success": True, "converted": True, "id": drafts[0].id, "converted_count": len(drafts)}
+    if not converted_count:
+        return {"success": True, "converted": False}
+
+    return {"success": True, "converted": True, "converted_count": converted_count}

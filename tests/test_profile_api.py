@@ -7,7 +7,13 @@ from fastapi import Request
 from app.models.client import Client
 from app.models.client_user import ClientUser
 from app.models.whatsapp_instance import WhatsAppInstance
-from app.routers.client_api import update_profile, get_profile, ProfileUpdateRequest
+from app.routers.client_api import (
+    NotificationSettingsUpdateRequest,
+    ProfileUpdateRequest,
+    get_profile,
+    update_notification_settings,
+    update_profile,
+)
 
 @pytest.mark.asyncio
 async def test_update_profile_saves_whatsapp_settings_and_links_instance():
@@ -91,3 +97,37 @@ async def test_update_profile_saves_whatsapp_settings_and_links_instance():
     finally:
         # Restore mock helper
         client_api.get_client_user_from_cookie = original_get_user
+
+
+@pytest.mark.asyncio
+async def test_notification_settings_auto_assigns_active_whatsapp_instance():
+    client = Client(
+        id=1,
+        name="Test Store",
+        owner_notify_whatsapp=False,
+        owner_whatsapp_number=None,
+        whatsapp_instance_id=None,
+        plan_tier="growth",
+    )
+    db = AsyncMock(spec=AsyncSession)
+    active_instance = WhatsAppInstance(id=42, instance_name="whatsapp-active", status="active")
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = active_instance
+    db.execute.return_value = mock_result
+
+    response = await update_notification_settings(
+        NotificationSettingsUpdateRequest(
+            owner_notify_whatsapp=True,
+            owner_whatsapp_number="8801700000000",
+            whatsapp_instance_id=999,
+        ),
+        client=client,
+        db=db,
+    )
+
+    assert client.owner_notify_whatsapp is True
+    assert client.owner_whatsapp_number == "8801700000000"
+    assert client.whatsapp_instance_id == 42
+    assert response["settings"]["whatsapp_instance_id"] == 42
+    db.get.assert_not_called()
+    db.commit.assert_called_once()

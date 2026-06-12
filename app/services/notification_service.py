@@ -31,6 +31,69 @@ def _bd_time_label() -> str:
     return datetime.now(timezone(timedelta(hours=6))).strftime("%d-%m-%Y %I:%M %p")
 
 
+def _format_product_summary(products, limit: int = 3) -> str:
+    if not isinstance(products, list):
+        return "Product"
+
+    parts: list[str] = []
+    for product in products[:limit]:
+        if not isinstance(product, dict):
+            continue
+        name = (
+            product.get("content_name")
+            or product.get("title")
+            or product.get("name")
+            or product.get("product_name")
+            or product.get("id")
+            or product.get("content_id")
+        )
+        if not name:
+            continue
+        quantity = product.get("quantity") or product.get("qty") or 1
+        category = product.get("content_category") or product.get("category") or ""
+        attributes = product.get("attributes") if isinstance(product.get("attributes"), dict) else {}
+        attr_text = ", ".join(f"{key}: {value}" for key, value in attributes.items() if value)
+        meta = " | ".join(str(value) for value in (category, attr_text) if value)
+        label = f"{name} x{quantity}"
+        if meta:
+            label = f"{label} ({meta})"
+        parts.append(label)
+
+    if len(products) > limit:
+        parts.append(f"+{len(products) - limit} more")
+    return ", ".join(parts) if parts else "Product"
+
+
+def _coerce_product_list(value) -> list[dict]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _purchase_products(event_payload: dict) -> list[dict]:
+    products = _coerce_product_list(get_field(event_payload, "custom_data.contents"))
+    if products:
+        return products
+
+    for path in (
+        "raw_order_data.products",
+        "raw_order_data.items",
+        "raw_order_data.line_items",
+        "raw_order_data.contents",
+    ):
+        products = _coerce_product_list(get_field(event_payload, path))
+        if products:
+            return products
+
+    content_name = get_field(event_payload, "custom_data.content_name")
+    if content_name:
+        return [{
+            "content_name": content_name,
+            "quantity": get_field(event_payload, "custom_data.num_items") or 1,
+        }]
+    return []
+
+
 def format_purchase_message(client: Client, event_payload: dict) -> str:
     """Format purchase notification message for store owners."""
     store_name = client.name
@@ -42,10 +105,11 @@ def format_purchase_message(client: Client, event_payload: dict) -> str:
         amount_str = str(amount)
 
     currency = get_field(event_payload, "custom_data.currency") or "BDT"
-    contents = get_field(event_payload, "custom_data.contents")
+    contents = _purchase_products(event_payload)
     num_items = get_field(event_payload, "custom_data.num_items")
     if num_items is None:
         num_items = len(contents) if isinstance(contents, list) else 1
+    items_str = _format_product_summary(contents)
 
     return "\n".join([
         "নতুন অর্ডার এসেছে!",
@@ -53,6 +117,7 @@ def format_purchase_message(client: Client, event_payload: dict) -> str:
         f"অর্ডার আইডি: #{order_id}",
         f"পরিমাণ: {amount_str} {currency}",
         f"আইটেম সংখ্যা: {num_items}",
+        f"Items: {items_str}",
         f"সময়: {_bd_time_label()}",
     ])
 
@@ -68,14 +133,7 @@ def format_incomplete_checkout_message(client: Client, checkout_payload: Incompl
         amount_str = str(amount)
     currency = checkout_payload.currency or "BDT"
 
-    product_names = []
-    if checkout_payload.products:
-        for product in checkout_payload.products:
-            if isinstance(product, dict):
-                name = product.get("content_name") or product.get("name")
-                if name:
-                    product_names.append(str(name))
-    items_str = ", ".join(product_names) if product_names else "Product"
+    items_str = _format_product_summary(checkout_payload.products)
 
     return "\n".join([
         "ইনকমপ্লিট চেকআউট অ্যালার্ট!",

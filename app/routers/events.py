@@ -26,6 +26,7 @@ from app.services.plan_service import has_growth_access, remaining_monthly_order
 from app.services.site_binding_service import check_site_event_rate_limit, validate_event_site_binding
 from app.services.visitor_context import extract_device_metadata
 from app.models.pending_event import PendingEvent
+from app.routers.incomplete_checkouts import recover_open_checkouts_for_order
 
 logger = logging.getLogger(__name__)
 
@@ -615,6 +616,23 @@ async def receive_events(
                         f"[{client.name}] Pending order insert failed ({order_id}): {exc}"
                     )
                     raise
+
+            if isinstance(raw_order_data, dict):
+                recipient_phone = str(
+                    raw_order_data.get("recipient_phone")
+                    or raw_order_data.get("customer_phone")
+                    or raw_order_data.get("billing_phone")
+                    or ""
+                ).strip()
+                if recipient_phone:
+                    recovered = await recover_open_checkouts_for_order(
+                        db,
+                        client_id=client.id,
+                        phone=recipient_phone,
+                        order_id=str(order_id),
+                    )
+                    if recovered:
+                        logger.info(f"[{client.name}] Recovered incomplete checkout for order: {order_id}")
 
         operations_events = [
             event for event in queue_events

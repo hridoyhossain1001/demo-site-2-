@@ -153,7 +153,7 @@ function buykorigw_add_order_note( $order_id, $note ) {
 function buykorigw_order_contents_payload( $order ) {
     $settings = buykorigw_get_settings();
     $content_format = isset( $settings['content_id_format'] ) ? $settings['content_id_format'] : 'id';
-    $enable_variations = isset( $settings['enable_variations'] ) ? (bool) $settings['enable_variations'] : false;
+    $enable_variations = isset( $settings['enable_variations'] ) ? (bool) $settings['enable_variations'] : true;
 
     $content_ids = array();
     $contents    = array();
@@ -191,20 +191,25 @@ function buykorigw_order_contents_payload( $order ) {
 
         $content_ids[] = $final_id;
 
-        // Product name — $item->get_name() returns the product title from WooCommerce
         $product_name = $item->get_name();
+        $product_categories = function_exists( 'wc_get_product_terms' )
+            ? implode( ', ', wp_list_pluck( wc_get_product_terms( $product_id, 'product_cat' ), 'name' ) )
+            : '';
 
         $content_item = array(
             'id'           => $final_id,
             'content_id'   => $final_id,
             'content_type' => 'product',
-            'title'        => $product_name,  // Product name — portal এ দেখাবে
-            'name'         => $product_name,  // Fallback key
+            'title'        => $product_name,
+            'name'         => $product_name,
+            'content_name' => $product_name,
+            'content_category' => $product_categories,
             'quantity'     => $quantity,
+            'price'        => (float) ( $item->get_total() / $quantity ),
             'item_price'   => (float) ( $item->get_total() / $quantity ),
         );
 
-        if ( $enable_variations && $variation_id ) {
+        if ( $variation_id ) {
             $variation = wc_get_product( $variation_id );
             if ( $variation ) {
                 $attributes = $variation->get_variation_attributes();
@@ -223,6 +228,16 @@ function buykorigw_order_contents_payload( $order ) {
                 }
                 if ( ! empty( $formatted_attributes ) ) {
                     $content_item['attributes'] = $formatted_attributes;
+                }
+            }
+            foreach ( $item->get_formatted_meta_data( '' ) as $meta ) {
+                $attribute_label = trim( wp_strip_all_tags( (string) $meta->display_key ) );
+                $attribute_value = trim( wp_strip_all_tags( (string) $meta->display_value ) );
+                if ( $attribute_label !== '' && $attribute_value !== '' ) {
+                    if ( empty( $content_item['attributes'] ) || ! is_array( $content_item['attributes'] ) ) {
+                        $content_item['attributes'] = array();
+                    }
+                    $content_item['attributes'][ $attribute_label ] = $attribute_value;
                 }
             }
         }

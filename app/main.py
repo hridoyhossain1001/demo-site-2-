@@ -578,3 +578,9 @@ async def health_check():
     }
     _status_cache = (now, payload)
     return payload
+
+
+@app.get("/health", tags=["Health"], include_in_schema=False)
+async def health_alias():
+    """Compatibility alias for uptime checks that still call /health."""
+    return await health_check()

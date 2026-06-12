@@ -19,11 +19,12 @@ All four should describe the same release.
 4. Run Python compile checks.
 5. Run `pytest`.
 6. Run PHP lint for every plugin PHP file.
-7. Rebuild `wordpress-plugin/buykori-adsync.zip` and `buykori-adsync-updated.zip` with `python zip_plugin.py`.
-8. Deploy server.
-9. Run `alembic upgrade head`.
-10. Test update flow in staging.
-11. Release to production clients.
+7. Rebuild `wordpress-plugin/buykori-adsync.zip` with `python scripts/ops/zip_plugin.py`.
+8. Deploy the rebuilt `wordpress-plugin/buykori-adsync.zip` with the server files so `/api/v1/plugin/download` never points to a missing or stale package.
+9. Verify `/api/v1/plugin/info` returns `package_available: true`, the expected `version`, and the new `package_sha256`.
+10. Run `alembic upgrade head`.
+11. Test update flow in staging.
+12. Release to production clients.
 
 ## Rollback
 

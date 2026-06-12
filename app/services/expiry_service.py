@@ -142,3 +142,119 @@ async def expire_old_pending_events():
         except Exception as e:
             logger.error(f"⏰ Expiry service error: {e}")
             await asyncio.sleep(60)  # Error হলে ১ মিনিট পরে retry
+
+
+async def run_incomplete_checkout_refresh_loop():
+    """
+    Background worker loop to periodically check active checkouts,
+    refresh stale ones to 'incomplete' status (older than 20 mins),
+    and enqueue WhatsApp notifications for store owners.
+    """
+    import os
+    logger.info("⏰ Incomplete Checkout Auto-Refresh Loop started.")
+    poll_interval = int(os.getenv("INCOMPLETE_CHECKOUT_POLL_SECONDS", "60"))
+
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            inactive_before = now - timedelta(minutes=20)
+
+            async with AsyncSessionLocal() as db:
+                from app.models.incomplete_checkout import IncompleteCheckout
+                from app.models.client import Client
+                from app.models.pending_event import PendingEvent
+                from app.routers.incomplete_checkouts import _normalize_phone, recover_open_checkouts_for_order
+                from app.services.notification_service import create_incomplete_checkout_whatsapp_job
+
+                def matching_order_id(checkout, pending_events):
+                    try:
+                        checkout_phone = _normalize_phone(checkout.phone or "")
+                    except Exception:
+                        return None
+                    checkout_activity = checkout.last_activity_at
+                    if checkout_activity and checkout_activity.tzinfo is None:
+                        checkout_activity = checkout_activity.replace(tzinfo=timezone.utc)
+                    for pending in pending_events:
+                        pending_created = pending.created_at
+                        if checkout_activity and pending_created:
+                            if pending_created.tzinfo is None:
+                                pending_created = pending_created.replace(tzinfo=timezone.utc)
+                            if pending_created < checkout_activity - timedelta(minutes=5):
+                                continue
+                        raw = pending.raw_order_data if isinstance(pending.raw_order_data, dict) else {}
+                        candidate = str(
+                            raw.get("recipient_phone")
+                            or raw.get("customer_phone")
+                            or raw.get("billing_phone")
+                            or ""
+                        ).strip()
+                        if not candidate:
+                            continue
+                        try:
+                            if _normalize_phone(candidate) == checkout_phone:
+                                return pending.order_id
+                        except Exception:
+                            continue
+                    return None
+
+                # Find all active checkouts that are older than 20 minutes and lock them
+                stale_result = await db.execute(
+                    select(IncompleteCheckout).where(
+                        IncompleteCheckout.status == "active",
+                        IncompleteCheckout.last_activity_at < inactive_before,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+                stale_checkouts = stale_result.scalars().all()
+
+                if stale_checkouts:
+                    client_ids = {c.client_id for c in stale_checkouts}
+                    clients_r = await db.execute(
+                        select(Client).where(Client.id.in_(client_ids))
+                    )
+                    clients = {c.id: c for c in clients_r.scalars().all()}
+
+                    pending_r = await db.execute(
+                        select(PendingEvent).where(
+                            and_(
+                                PendingEvent.client_id.in_(client_ids),
+                                PendingEvent.raw_order_data.is_not(None),
+                                PendingEvent.created_at >= inactive_before - timedelta(hours=12),
+                            )
+                        )
+                    )
+                    pending_by_client: dict[int, list[PendingEvent]] = {}
+                    for pending in pending_r.scalars().all():
+                        pending_by_client.setdefault(pending.client_id, []).append(pending)
+
+                    refreshed_count = 0
+                    recovered_count = 0
+                    for checkout in stale_checkouts:
+                        client = clients.get(checkout.client_id)
+                        order_id = matching_order_id(checkout, pending_by_client.get(checkout.client_id, []))
+                        if order_id:
+                            recovered = await recover_open_checkouts_for_order(
+                                db,
+                                client_id=checkout.client_id,
+                                phone=checkout.phone or "",
+                                order_id=str(order_id),
+                            )
+                            if recovered:
+                                recovered_count += 1
+                                continue
+                        checkout.status = "incomplete"
+                        if client:
+                            await create_incomplete_checkout_whatsapp_job(db, client, checkout)
+                        refreshed_count += 1
+
+                    await db.commit()
+                    logger.info(
+                        "Auto-refreshed %s stale checkout(s), recovered %s from matching orders, and queued WhatsApp alerts.",
+                        refreshed_count,
+                        recovered_count,
+                    )
+
+            await asyncio.sleep(poll_interval)
+        except Exception as e:
+            logger.error(f"⏰ Incomplete Checkout refresh loop error: {e}")
+            await asyncio.sleep(30)

@@ -54,7 +54,7 @@ class PluginDisconnectRequest(BaseModel):
 
 # Plugin version এই ফাইলে hardcoded — PLUGIN_VERSION env var দিয়ে override করা যায়।
 # Update করার সময় এখানে version change করুন এবং WP plugin-এও update করুন।
-PLUGIN_VERSION = "1.2.49"
+PLUGIN_VERSION = "1.2.51"
 PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "wordpress-plugin" / "buykori-adsync"
 PLUGIN_ZIP_PATH = Path(
     os.getenv(
@@ -131,7 +131,7 @@ async def plugin_info(request: Request):
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-06-09",
+        "last_updated": "2026-06-11",
     })
 
 
@@ -175,9 +175,16 @@ def _plugin_update_response(download_url: str, package_sha256: str, signature: s
         "requires": "5.8",
         "tested": "6.7",
         "requires_php": "7.4",
-        "last_updated": "2026-06-09",
+        "last_updated": "2026-06-11",
         "description": "Official Buykori AdSync WordPress plugin for server-side Facebook CAPI, TikTok, and GA4 tracking with one-page landing support and deferred purchase control.",
         "changelog": (
+            "<h4>v1.2.51</h4><ul>"
+            "<li>Adds WooCommerce variation attributes such as color and size to pending COD order details</li>"
+            "</ul>"
+            "<h4>v1.2.50</h4><ul>"
+            "<li>Sends WooCommerce orders to Buykori during order creation instead of waiting for traffic-triggered WP-Cron</li>"
+            "<li>Confirms incomplete-checkout recovery delivery before marking the order recovered</li>"
+            "</ul>"
             "<h4>v1.2.49</h4><ul>"
             "<li>Allows safe update checks before a store is connected to Buykori, using HTTPS host validation and package SHA-256 verification</li>"
             "</ul>"
@@ -478,8 +485,7 @@ def _generate_preconfigured_zip(api_key: str, gateway_url: str) -> io.BytesIO:
             for fname in files:
                 file_path = Path(root) / fname
                 rel_path = file_path.relative_to(PLUGIN_SOURCE_DIR.parent)
-                # Use forward slashes for cross-platform compatibility
-                arc_name = str(rel_path).replace(os.sep, "/")
+                arc_name = rel_path.as_posix()
 
                 content = file_path.read_bytes()
 

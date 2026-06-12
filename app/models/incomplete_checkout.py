@@ -30,4 +30,5 @@ class IncompleteCheckout(Base):
     __table_args__ = (
         Index("ix_incomplete_client_status_activity", "client_id", "status", "last_activity_at"),
         Index("ix_incomplete_client_visitor_phone", "client_id", "visitor_id", "phone_hash"),
+        Index("ix_incomplete_client_phone_status", "client_id", "phone_hash", "status"),
     )

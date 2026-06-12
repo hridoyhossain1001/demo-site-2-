@@ -1,4 +1,4 @@
-﻿"""
+"""
 Durable event outbox worker.
 
 The /events endpoint persists accepted events into event_outbox and returns quickly.
@@ -542,7 +542,7 @@ async def process_event_outbox_forever() -> None:
 
 if __name__ == "__main__":
     from app.services.cleanup_service import auto_cleanup_database
-    from app.services.expiry_service import expire_old_pending_events
+    from app.services.expiry_service import expire_old_pending_events, run_incomplete_checkout_refresh_loop
     from app.services.retry_service import retry_failed_events
     from app.services.courier_status_worker import poll_courier_statuses_forever
     from app.services.courier_booking_service import process_courier_booking_jobs_forever
@@ -556,6 +556,7 @@ if __name__ == "__main__":
             expire_old_pending_events(),
             poll_courier_statuses_forever(),
             process_courier_booking_jobs_forever(),
+            run_incomplete_checkout_refresh_loop(),
         )
 
     asyncio.run(main())
