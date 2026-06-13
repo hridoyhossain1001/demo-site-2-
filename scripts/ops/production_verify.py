@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy import select
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +18,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.database import AsyncSessionLocal
+from app.models.client import Client
+from app.services.client_secrets import decrypt_capi_signing_secret
 from scripts.ops.staging_smoke_check import run_smoke
 
 
@@ -24,6 +27,31 @@ async def query_rows(statement: str) -> list[dict[str, Any]]:
     async with AsyncSessionLocal() as db:
         result = await db.execute(text(statement))
         return [dict(row._mapping) for row in result]
+
+
+async def client_secret_snapshot() -> dict[str, Any]:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Client).where(Client.is_active.is_(True)).order_by(Client.id))
+        clients = list(result.scalars().all())
+
+    valid: list[dict[str, Any]] = []
+    missing_or_invalid: list[dict[str, Any]] = []
+    for client in clients:
+        try:
+            has_valid_secret = bool(decrypt_capi_signing_secret(client.capi_signing_secret))
+        except Exception:
+            has_valid_secret = False
+        entry = {"id": client.id, "name": client.name, "domain": client.domain}
+        if has_valid_secret:
+            valid.append(entry)
+        else:
+            missing_or_invalid.append(entry)
+    return {
+        "active_total": len(clients),
+        "active_with_decryptable_signing_secret": len(valid),
+        "active_missing_or_invalid_signing_secret": len(missing_or_invalid),
+        "missing_or_invalid_clients": missing_or_invalid,
+    }
 
 
 async def database_snapshot() -> dict[str, Any]:
@@ -70,6 +98,7 @@ async def database_snapshot() -> dict[str, Any]:
     )
     return {
         "clients": clients[0],
+        "client_secret_readiness": await client_secret_snapshot(),
         "active_clients_missing_signing_secret": missing_signing_secrets,
         "queues": queues,
         "dead_courier_jobs": dead_courier_jobs,
