@@ -15,6 +15,7 @@ DB_NAME="buykori_adsync"
 DB_USER="buykori"
 GENERATED_ADMIN_PASSWORD=""
 GENERATED_ADMIN_API_KEY=""
+GENERATED_ADMIN_JWT_SECRET=""
 
 # Output helpers
 info() { echo -e "\e[34m[INFO]\e[0m $1"; }
@@ -145,7 +146,14 @@ if [ -z "$ADMIN_API_KEY" ]; then
     fi
 fi
 
-if [ -n "$GENERATED_ADMIN_PASSWORD" ] || [ -n "$GENERATED_ADMIN_API_KEY" ]; then
+# 5. Admin JWT/CSRF signing secret
+if [ -z "$ADMIN_JWT_SECRET" ]; then
+    ADMIN_JWT_SECRET=$(openssl rand -hex 32)
+    GENERATED_ADMIN_JWT_SECRET="$ADMIN_JWT_SECRET"
+    info "Generated separate Admin JWT signing secret (not printed to logs)."
+fi
+
+if [ -n "$GENERATED_ADMIN_PASSWORD" ] || [ -n "$GENERATED_ADMIN_API_KEY" ] || [ -n "$GENERATED_ADMIN_JWT_SECRET" ]; then
     INITIAL_CREDS_FILE="$PROJECT_DIR/.initial-credentials"
     {
         echo "Buykori AdSync generated setup credentials"
@@ -153,6 +161,7 @@ if [ -n "$GENERATED_ADMIN_PASSWORD" ] || [ -n "$GENERATED_ADMIN_API_KEY" ]; then
         echo "Remove this file after saving the values in a password manager."
         [ -n "$GENERATED_ADMIN_PASSWORD" ] && echo "Admin Password: $GENERATED_ADMIN_PASSWORD"
         [ -n "$GENERATED_ADMIN_API_KEY" ] && echo "Admin API Key: $GENERATED_ADMIN_API_KEY"
+        [ -n "$GENERATED_ADMIN_JWT_SECRET" ] && echo "Admin JWT Secret: $GENERATED_ADMIN_JWT_SECRET"
     } > "$INITIAL_CREDS_FILE"
     chmod 600 "$INITIAL_CREDS_FILE"
     info "Generated credentials were written to $INITIAL_CREDS_FILE (chmod 600). Remove it after saving."
@@ -177,12 +186,20 @@ cat <<EOF > "$ENV_FILE"
 # ------------------------------------------------------------------------------
 DATABASE_URL="$DATABASE_URL"
 REDIS_URL="$REDIS_URL"
+APP_ENV="production"
 ADMIN_USERNAME="$ADMIN_USERNAME"
 ADMIN_PASSWORD="$ADMIN_PASSWORD"
 ADMIN_API_KEY="$ADMIN_API_KEY"
+ADMIN_JWT_SECRET="$ADMIN_JWT_SECRET"
 ENCRYPTION_KEY="$ENCRYPTION_KEY"
 PRIMARY_DOMAIN="$PRIMARY_DOMAIN"
 ENABLE_DOCS=false
+CSP_STRICT_NONCE=true
+TRUST_PROXY_HEADERS=true
+ALLOW_CAPI_API_KEY_SIGNING_FALLBACK=false
+FRAUD_AUTO_HOLD_THRESHOLD=90
+ALLOW_GLOBAL_COURIER_WEBHOOK_SECRET_FALLBACK=false
+ALLOW_GLOBAL_STEADFAST_WEBHOOK_TOKEN_FALLBACK=false
 
 # Database connection pool settings (tuned for 2GB RAM Droplet)
 DB_POOL_SIZE=5

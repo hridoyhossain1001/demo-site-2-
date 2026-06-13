@@ -13,6 +13,7 @@ from app.models.client_session import ClientSession
 from app.security import decrypt_token
 from app.services.auth_service import hash_session_token
 from app.services.plan_service import effective_monthly_event_limit, has_growth_access
+from app.services.redis_pool import get_redis, record_redis_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,13 @@ class CachedClient:
     trial_started_at: datetime | None
     trial_ends_at: datetime | None
     shopify_shared_secret: str | None = None
+    woocommerce_webhook_secret: str | None = None
+    capi_signing_secret: str | None = None
     event_rules: dict | list | None = None
 
 
 _client_cache: dict[str, tuple[CachedClient, float]] = {}
+CLIENT_CACHE_INVALIDATION_PREFIX = "client_cache_invalidated_at:"
 CACHE_TTL = 60  # 60 সেকেন্ড — client info cache করে রাখো
 
 ALLOWED_CLIENT_AUTH_HOSTS = {
@@ -84,9 +88,15 @@ def _origin_allowed_for_cookie_auth(request: Request) -> bool:
     return host in ALLOWED_CLIENT_AUTH_HOSTS
 
 
+def _client_cache_invalidation_key(api_key: str) -> str:
+    return f"{CLIENT_CACHE_INVALIDATION_PREFIX}{api_key}"
+
+
 def clear_client_cache(api_key: str):
     """Admin update-এর পর cache ক্লিয়ার করতে ব্যবহৃত হয়।
     api_key এবং public:{public_key} উভয় ধরনের cache entry মুছে ফেলে।"""
+    if not api_key:
+        return
     keys_to_delete = []
     for cache_key, (cached, _) in list(_client_cache.items()):
         if cache_key == api_key or cached.api_key == api_key:
@@ -96,6 +106,41 @@ def clear_client_cache(api_key: str):
                 keys_to_delete.append(f"public:{cached.public_key}")
     for k in keys_to_delete:
         _client_cache.pop(k, None)
+
+
+async def invalidate_client_cache(api_key: str) -> None:
+    clear_client_cache(api_key)
+    redis = get_redis()
+    if not redis:
+        return
+    try:
+        await redis.set(
+            _client_cache_invalidation_key(api_key),
+            str(time.time()),
+            ex=max(CACHE_TTL * 4, 300),
+        )
+    except Exception as exc:
+        logger.warning("Redis client cache invalidation failed: %s", exc)
+        record_redis_fallback("client_cache_invalidation")
+
+
+async def _client_cache_invalidated(api_key: str, cached_at: float) -> bool:
+    redis = get_redis()
+    if not redis:
+        return False
+    try:
+        invalidated_at = await redis.get(_client_cache_invalidation_key(api_key))
+    except Exception as exc:
+        logger.warning("Redis client cache invalidation check failed: %s", exc)
+        record_redis_fallback("client_cache_invalidation_check")
+        return False
+    if not invalidated_at:
+        return False
+    try:
+        return float(invalidated_at) > cached_at
+    except (TypeError, ValueError):
+        return True
+
 
 def set_in_client_cache(cache_key: str, cached_client: CachedClient):
     """ক্যাশে নতুন ক্লায়েন্ট অ্যাড করার সময় ক্যাশের সাইজ ১০০০-এর নিচে রাখে যাতে মেমোরি লিক না হয়"""
@@ -142,6 +187,8 @@ def _snapshot(client: Client) -> CachedClient:
         trial_started_at=getattr(client, 'trial_started_at', None),
         trial_ends_at=getattr(client, 'trial_ends_at', None),
         shopify_shared_secret=getattr(client, 'shopify_shared_secret', None),
+        woocommerce_webhook_secret=getattr(client, 'woocommerce_webhook_secret', None),
+        capi_signing_secret=getattr(client, 'capi_signing_secret', None),
         event_rules=getattr(client, 'event_rules', None),
     )
 
@@ -202,8 +249,6 @@ async def get_current_client(
                         expected_secret = getattr(portal_client, "portal_key", None)
                         if expected_secret and secrets.compare_digest(session_secret, expected_secret):
                             x_api_key = portal_client.api_key
-                        elif not expected_secret and secrets.compare_digest(session_secret, portal_client.api_key):
-                            x_api_key = portal_client.api_key
                 except (TypeError, ValueError):
                     pass
             else:
@@ -219,9 +264,15 @@ async def get_current_client(
     now = time.time()
     if x_api_key in _client_cache:
         cached, cached_at = _client_cache[x_api_key]
-        if now - cached_at < CACHE_TTL:
+        if cached.api_key != x_api_key:
+            # Alias/old-key cache entries must be revalidated so rotation grace cannot
+            # be extended by the cache TTL.
+            del _client_cache[x_api_key]
+        elif now - cached_at < CACHE_TTL:
             # Cache hit — DB query বাদ!
-            if cached.is_active:
+            if await _client_cache_invalidated(cached.api_key, cached_at):
+                del _client_cache[x_api_key]
+            elif cached.is_active:
                 return cached
             else:
                 # Cache-এ আছে কিন্তু inactive — remove & reject
@@ -242,6 +293,7 @@ async def get_current_client(
     )
     clients = result.scalars().all()
     client = None
+    authenticated_with_old_key = False
 
     for c in clients:
         if c.api_key == x_api_key:
@@ -253,6 +305,7 @@ async def get_current_client(
             current_time = datetime.now(timezone.utc)
             if (current_time - rotated_at).total_seconds() <= 900:  # 15 minutes grace period
                 client = c
+                authenticated_with_old_key = True
                 break
 
     if not client:
@@ -263,5 +316,6 @@ async def get_current_client(
 
     # ─── Cache-এ রাখো (plain dataclass — safe across sessions) ──────
     cached = _snapshot(client)
-    set_in_client_cache(x_api_key, cached)
+    if not authenticated_with_old_key:
+        set_in_client_cache(x_api_key, cached)
     return cached

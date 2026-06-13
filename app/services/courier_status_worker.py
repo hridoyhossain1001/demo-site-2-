@@ -91,7 +91,20 @@ async def _poll_active_courier_orders_unlocked() -> None:
             select(CourierOrder, Client)
             .join(Client, CourierOrder.client_id == Client.id)
             .where(
-                CourierOrder.courier_status.in_(["pending", "picked", "in_transit"])
+                or_(
+                    CourierOrder.courier_status.in_(["pending", "picked", "in_transit"]),
+                    and_(
+                        CourierOrder.courier_status == "delivered",
+                        CourierOrder.pending_event_id.is_not(None),
+                        CourierOrder.purchase_event_sent.is_(False),
+                    ),
+                    and_(
+                        CourierOrder.courier_status.in_(["returned", "cancelled"]),
+                        CourierOrder.pending_event_id.is_not(None),
+                        CourierOrder.purchase_event_sent.is_(True),
+                        CourierOrder.refund_event_sent.is_(False),
+                    ),
+                )
             )
         )
         active_rows = result.all()

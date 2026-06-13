@@ -17,7 +17,6 @@ from app.models.event_log import EventLog
 from app.models.failed_event import FailedEvent
 from app.schemas.event import EventData
 from app.services.delivery_service import deliver_events_to_platforms, wait_for_secondary_tasks
-from app.services.usage_service import increment_usage_counters_db
 
 logger = logging.getLogger(__name__)
 
@@ -168,17 +167,6 @@ async def retry_failed_events():
                             fb_response=json.dumps(result) if result else None,
                         ))
                         await db.commit()
-
-                        try:
-                            # Usage counter errors should not undo the already persisted retry success.
-                            async with db.begin_nested():
-                                await increment_usage_counters_db(db, client, len(events))
-                            await db.commit()
-                        except Exception as usage_error:
-                            await db.rollback()
-                            logger.warning(
-                                f"[{client.name}] Retry usage counter failed (non-fatal): {usage_error}"
-                            )
 
                         logger.info(
                             f"[{client.name}] Retry #{failed.retry_count + 1} সফল! "

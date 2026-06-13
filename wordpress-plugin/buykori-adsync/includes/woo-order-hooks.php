@@ -372,6 +372,18 @@ function buykorigw_send_order_initiate_checkout_fallback( $order_or_id ) {
     }
 }
 
+function buykorigw_claim_confirm_attempt( $order_id, $status ) {
+    static $attempted = array();
+
+    $key = absint( $order_id ) . ':' . buykorigw_normalize_order_status_slug( $status );
+    if ( isset( $attempted[ $key ] ) ) {
+        return false;
+    }
+
+    $attempted[ $key ] = true;
+    return true;
+}
+
 function buykorigw_on_order_status_change( $order_id, $old_status = '', $new_status = '', $order_from_hook = null ) {
     $settings = buykorigw_get_settings();
 
@@ -409,6 +421,10 @@ function buykorigw_on_order_status_change( $order_id, $old_status = '', $new_sta
         if ( $settings['debug_mode'] ) {
             error_log( "[Buykori AdSync] Order #$order_id already confirmed, skipping." );
         }
+        return;
+    }
+
+    if ( ! buykorigw_claim_confirm_attempt( $order_id, $current_status ) ) {
         return;
     }
 
@@ -547,7 +563,7 @@ function buykorigw_confirm_order( $order_id ) {
     }
 
     // Non-200 or unexpected response — always log
-    error_log( "[Buykori AdSync] Confirm HTTP $code for order #$order_id: " . wp_json_encode( $body ) );
+    error_log( "[Buykori AdSync] Confirm HTTP $code for order #$order_id." );
 
     return false;
 }
@@ -591,7 +607,7 @@ function buykorigw_cancel_order( $order_id ) {
         return true;
     }
 
-    error_log( "[Buykori AdSync] Cancel HTTP $code for order #$order_id: " . wp_json_encode( $body ) );
+    error_log( "[Buykori AdSync] Cancel HTTP $code for order #$order_id." );
     return false;
 }
 

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, status
@@ -21,10 +21,12 @@ from app.services.geoip_service import get_location_data
 from app.services.event_quality import boost_event_quality
 from app.services.event_worker import enqueue_events
 from app.services.fast_ingest_service import reserve_usage_and_enqueue_stream
+from app.services.fraud_service import calculate_fraud_score, should_auto_hold_for_fraud
 from app.services.usage_service import check_and_reserve_usage
 from app.services.plan_service import has_growth_access, remaining_monthly_order_capacity
 from app.services.site_binding_service import check_site_event_rate_limit, validate_event_site_binding
 from app.services.visitor_context import extract_device_metadata
+from app.services.client_secrets import decrypt_capi_signing_secret
 from app.models.pending_event import PendingEvent
 from app.routers.incomplete_checkouts import recover_open_checkouts_for_order
 
@@ -86,6 +88,7 @@ def _verify_capi_signature(
 
 
 REQUIRE_SIGNED_DOMAIN_PROOF = os.getenv("REQUIRE_SIGNED_DOMAIN_PROOF", "true").lower() in ("1", "true", "yes")
+ALLOW_CAPI_API_KEY_SIGNING_FALLBACK = os.getenv("ALLOW_CAPI_API_KEY_SIGNING_FALLBACK", "false").lower() in ("1", "true", "yes")
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in ("1", "true", "yes")
 
 
@@ -111,6 +114,20 @@ def _request_client_ip(request: Request) -> str | None:
     return request.client.host if request.client else None
 
 
+def _capi_signing_secret_for_client(client: CachedClient) -> str:
+    try:
+        signing_secret = decrypt_capi_signing_secret(getattr(client, "capi_signing_secret", None))
+    except Exception:
+        logger.warning("[%s] CAPI signing secret decrypt failed.", client.name)
+        signing_secret = ""
+    if signing_secret:
+        return signing_secret
+    if ALLOW_CAPI_API_KEY_SIGNING_FALLBACK:
+        logger.warning("[%s] Using legacy API-key CAPI signing fallback.", client.name)
+        return client.api_key
+    return ""
+
+
 @router.post("/events/browser-audit", status_code=status.HTTP_202_ACCEPTED)
 async def record_browser_pixel_audit(
     request: Request,
@@ -132,7 +149,7 @@ async def record_browser_pixel_audit(
     raw_body = await request.body()
     if not _verify_capi_signature(
         raw_body,
-        client.api_key,
+        _capi_signing_secret_for_client(client),
         request.headers.get("x-capi-timestamp", ""),
         request.headers.get("x-capi-signature", ""),
     ):
@@ -230,7 +247,16 @@ def _event_order_id(event) -> str:
         return str(event.custom_data.order_id)
     if event.event_id:
         return str(event.event_id)
-    return f"auto-{event.event_time}-{id(event)}"
+    identity_payload = event.model_dump(exclude_none=True)
+    identity_json = json.dumps(
+        identity_payload,
+        default=str,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    identity_hash = hashlib.sha256(identity_json.encode("utf-8")).hexdigest()[:24]
+    return f"auto-{event.event_time}-{identity_hash}"
 
 
 async def _upsert_order_record(
@@ -409,7 +435,7 @@ async def receive_events(
                 raw_body = await request.body()
                 signed_declared_origin_ok = _verify_capi_signature(
                     raw_body,
-                    client.api_key,
+                    _capi_signing_secret_for_client(client),
                     request.headers.get("x-capi-timestamp", ""),
                     request.headers.get("x-capi-signature", ""),
                 )
@@ -509,6 +535,27 @@ async def receive_events(
             if not (should_hold and event.event_name == "Purchase")
         ]
 
+        fraud_results_by_event = {}
+        if not force_send:
+            reviewed_queue_candidates = []
+            for event in queue_candidates:
+                if event.event_name != "Purchase":
+                    reviewed_queue_candidates.append(event)
+                    continue
+                fraud_result = await calculate_fraud_score(db, client.id, event, client_ip)
+                fraud_results_by_event[id(event)] = fraud_result
+                if should_auto_hold_for_fraud(fraud_result[0]):
+                    deferred_events.append(event)
+                    logger.warning(
+                        "[%s] High-risk Purchase auto-held for fraud review: %s (score=%s)",
+                        client.name,
+                        _event_order_id(event),
+                        fraud_result[0],
+                    )
+                else:
+                    reviewed_queue_candidates.append(event)
+            queue_candidates = reviewed_queue_candidates
+
         # Held Purchase events are idempotent by pending_events(client_id, order_id).
         # Reserving their event_id globally before the pending insert can strand COD
         # orders if a retry already wrote a dedup row but failed before queueing.
@@ -525,11 +572,14 @@ async def receive_events(
 
         # Purchase events → pending_events table; confirm flow sends these later.
         # Parallelize fraud score calculation using asyncio.gather instead of sequential await in loops
-        from app.services.fraud_service import calculate_fraud_score
         import asyncio
 
         fraud_tasks = []
+        fraud_task_events = []
         for event in deferred_events:
+            if id(event) in fraud_results_by_event:
+                continue
+            fraud_task_events.append(event)
             fraud_tasks.append(calculate_fraud_score(db, client.id, event, client_ip))
 
         fraud_results = []
@@ -539,79 +589,70 @@ async def receive_events(
             except Exception as e:
                 logger.error(f"[{client.name}] Parallel fraud score calculation failed: {e}")
                 # Fallback to None for all tasks if gather failed
-                fraud_results = [(None, None) for _ in deferred_events]
-        else:
-            fraud_results = []
+                fraud_results = [(None, None) for _ in fraud_task_events]
+        for event, fraud_result in zip(fraud_task_events, fraud_results):
+            fraud_results_by_event[id(event)] = fraud_result
 
-        for event, fraud_res in zip(deferred_events, fraud_results):
+        for event in deferred_events:
+            fraud_res = fraud_results_by_event.get(id(event))
             fraud_score_val, fraud_details_val = fraud_res if fraud_res else (None, None)
-            if event.custom_data and getattr(event.custom_data, "order_id", None):
-                order_id = event.custom_data.order_id
-            elif event.event_id:
-                order_id = event.event_id
-            else:
-                order_id = f"auto-{event.event_time}-{id(event)}"
+            fraud_portal_state = "fraud_review" if should_auto_hold_for_fraud(fraud_score_val) else None
+            order_id = _event_order_id(event)
 
             raw_order_data = event.raw_order_data
             event_dict = _strip_internal_custom_data(event.model_dump(exclude_none=True))
-
             try:
-                async with db.begin_nested():
-                    pending = PendingEvent(
-                        client_id=client.id,
-                        order_id=order_id,
-                        event_data=event_dict,
-                        raw_order_data=raw_order_data,
-                        status="pending",
-                        fraud_score=fraud_score_val,
-                        fraud_details=fraud_details_val,
-                    )
-                    db.add(pending)
-                    await db.flush()  # unique constraint check
-                deferred_count += 1
-                logger.info(f"[{client.name}] Purchase hold: {order_id}")
-            except Exception as exc:
-                existing_result = await db.execute(
-                    select(PendingEvent)
-                    .where(
-                        and_(
-                            PendingEvent.client_id == client.id,
-                            PendingEvent.order_id == order_id,
-                        )
-                    )
-                    .order_by(PendingEvent.id.desc())
-                    .limit(1)
-                )
-                existing = existing_result.scalar_one_or_none()
+                event_occurred_at = datetime.fromtimestamp(event.event_time, timezone.utc)
+            except (OSError, OverflowError, TypeError, ValueError):
+                event_occurred_at = datetime.now(timezone.utc)
 
-                if existing and existing.status != "pending":
-                    old_status = existing.status
+            existing_result = await db.execute(
+                select(PendingEvent)
+                .where(
+                    and_(
+                        PendingEvent.client_id == client.id,
+                        PendingEvent.order_id == order_id,
+                    )
+                )
+                .order_by(PendingEvent.id.desc())
+                .limit(1)
+                .with_for_update()
+            )
+            existing = existing_result.scalar_one_or_none()
+
+            if existing:
+                if existing.status == "pending":
                     existing.event_data = event_dict
                     existing.raw_order_data = raw_order_data
-                    existing.status = "pending"
-                    existing.portal_state = None
-                    existing.is_confirmed = False
-                    existing.is_deleted = False
                     existing.fraud_score = fraud_score_val
                     existing.fraud_details = fraud_details_val
-                    existing.confirmed_at = None
-                    existing.created_at = datetime.now(timezone.utc)
+                    existing.portal_state = fraud_portal_state
                     deferred_count += 1
-                    logger.info(
-                        f"[{client.name}] Revived pending order: {order_id} "
-                        f"(was {old_status})"
-                    )
-                elif existing:
-                    existing.event_data = event_dict
-                    existing.raw_order_data = raw_order_data
-                    existing.fraud_score = fraud_score_val
-                    existing.fraud_details = fraud_details_val
-                    existing.created_at = datetime.now(timezone.utc)
-                    deferred_count += 1
-                    logger.info(
-                        f"[{client.name}] Refreshed duplicate pending order: {order_id}"
-                    )
+                    logger.info(f"[{client.name}] Refreshed duplicate pending order: {order_id}")
                 else:
+                    logger.info(
+                        f"[{client.name}] Duplicate held Purchase skipped for closed order: "
+                        f"{order_id} (status={existing.status})"
+                    )
+                    continue
+            else:
+                try:
+                    async with db.begin_nested():
+                        pending = PendingEvent(
+                            client_id=client.id,
+                            order_id=order_id,
+                            event_data=event_dict,
+                            raw_order_data=raw_order_data,
+                            status="pending",
+                            portal_state=fraud_portal_state,
+                            fraud_score=fraud_score_val,
+                            fraud_details=fraud_details_val,
+                        )
+                        db.add(pending)
+                        await db.flush()  # unique constraint check
+                    deferred_count += 1
+                    logger.info(f"[{client.name}] Purchase hold: {order_id}")
+                except Exception as exc:
                     logger.exception(
                         f"[{client.name}] Pending order insert failed ({order_id}): {exc}"
                     )
@@ -630,6 +671,8 @@ async def receive_events(
                         client_id=client.id,
                         phone=recipient_phone,
                         order_id=str(order_id),
+                        activity_window_start=event_occurred_at - timedelta(hours=12),
+                        activity_window_end=event_occurred_at + timedelta(minutes=5),
                     )
                     if recovered:
                         logger.info(f"[{client.name}] Recovered incomplete checkout for order: {order_id}")

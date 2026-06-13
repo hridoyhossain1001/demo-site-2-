@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import os
 import re
+import secrets
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ from app.services.auth_service import (
     normalize_email,
     verify_password,
 )
+from app.services.client_secrets import ensure_capi_signing_secret
 from app.services.plan_service import new_free_values, new_trial_values, plan_summary, record_trial_identity, require_trial_available
 from app.limiter import limiter
 
@@ -28,6 +30,8 @@ from app.limiter import limiter
 router = APIRouter()
 
 CLIENT_SESSION_COOKIE = "buykori_client_session"
+CLIENT_CSRF_COOKIE = "buykori_client_csrf"
+CLIENT_CSRF_HEADER = "X-Client-CSRF-Token"
 SESSION_DAYS = int(os.getenv("CLIENT_SESSION_DAYS", "30"))
 COOKIE_DOMAIN = os.getenv("CLIENT_COOKIE_DOMAIN", ".buykori.app")
 COOKIE_SECURE = os.getenv("CLIENT_COOKIE_SECURE", "true").lower() in ("true", "1", "yes")
@@ -106,6 +110,12 @@ def _validate_phone_number(phone_number: str) -> str:
 
 def require_allowed_origin(request: Request) -> None:
     origin = request.headers.get("origin")
+    cookie_authenticated_mutation = (
+        request.cookies.get(CLIENT_SESSION_COOKIE)
+        and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+    )
+    if not origin and cookie_authenticated_mutation:
+        raise HTTPException(status_code=403, detail="Origin is required for cookie-authenticated requests.")
     if not origin:
         return
     host = (urlparse(origin).hostname or "").lower()
@@ -117,6 +127,11 @@ def require_allowed_origin(request: Request) -> None:
     ).split(",", 1)[0].split(":", 1)[0].strip().lower()
     if host != request_host and host not in ALLOWED_CLIENT_AUTH_HOSTS:
         raise HTTPException(status_code=403, detail="Origin is not allowed.")
+    if cookie_authenticated_mutation:
+        csrf_cookie = request.cookies.get(CLIENT_CSRF_COOKIE) or ""
+        csrf_header = request.headers.get(CLIENT_CSRF_HEADER) or ""
+        if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie, csrf_header):
+            raise HTTPException(status_code=403, detail="Client CSRF token is missing or invalid.")
 
 
 def _get_cookie_domain(request: Request) -> str | None:
@@ -154,6 +169,22 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
     )
 
 
+def _set_csrf_cookie(response: Response, request: Request) -> str:
+    token = secrets.token_urlsafe(32)
+    domain = _get_cookie_domain(request)
+    response.set_cookie(
+        key=CLIENT_CSRF_COOKIE,
+        value=token,
+        max_age=SESSION_DAYS * 24 * 60 * 60,
+        httponly=False,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        domain=domain,
+        path="/",
+    )
+    return token
+
+
 def _clear_session_cookie(response: Response, request: Request) -> None:
     domain = _get_cookie_domain(request)
     response.delete_cookie(
@@ -162,6 +193,14 @@ def _clear_session_cookie(response: Response, request: Request) -> None:
         path="/",
         secure=COOKIE_SECURE,
         httponly=True,
+        samesite=COOKIE_SAMESITE,
+    )
+    response.delete_cookie(
+        key=CLIENT_CSRF_COOKIE,
+        domain=domain,
+        path="/",
+        secure=COOKIE_SECURE,
+        httponly=False,
         samesite=COOKIE_SAMESITE,
     )
 
@@ -195,6 +234,7 @@ async def _create_session(db: AsyncSession, user: ClientUser, response: Response
         expires_at=expires_at,
     ))
     _set_session_cookie(response, token, request)
+    _set_csrf_cookie(response, request)
 
 
 async def get_client_user_from_cookie(
@@ -271,6 +311,7 @@ async def client_signup(
     )
     db.add(client)
     await db.flush()
+    ensure_capi_signing_secret(client)
 
     user = ClientUser(
         client_id=client.id,
@@ -346,8 +387,10 @@ async def client_logout(
 @router.get("/auth/client/me")
 async def client_me(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     require_allowed_origin(request)
     user, client, _ = await get_client_user_from_cookie(request, db)
+    _set_csrf_cookie(response, request)
     return {"status": "success", "user": _user_payload(user, client)}

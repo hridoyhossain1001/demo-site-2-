@@ -37,4 +37,5 @@ class PendingEvent(Base):
         ),
         # expiry_service ও cleanup_service-এর জন্য composite index — full table scan এড়াতে
         Index('ix_pending_client_status_created', 'client_id', 'status', 'created_at'),
+        Index('ix_pending_client_created', 'client_id', 'created_at'),
     )

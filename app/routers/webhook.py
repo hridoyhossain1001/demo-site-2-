@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, HTTPException, Depends
@@ -38,6 +39,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 REQUIRE_WC_WEBHOOK_SIGNATURE = os.getenv("REQUIRE_WC_WEBHOOK_SIGNATURE", "true").lower() in ("1", "true", "yes")
+ALLOW_WC_WEBHOOK_GLOBAL_SECRET_FALLBACK = os.getenv(
+    "ALLOW_WC_WEBHOOK_GLOBAL_SECRET_FALLBACK",
+    "false",
+).lower() in ("1", "true", "yes")
 ALLOW_WC_WEBHOOK_API_KEY_SECRET_FALLBACK = os.getenv(
     "ALLOW_WC_WEBHOOK_API_KEY_SECRET_FALLBACK",
     "false",
@@ -46,6 +51,47 @@ ALLOW_SHOPIFY_PLAINTEXT_SHARED_SECRET = os.getenv(
     "ALLOW_SHOPIFY_PLAINTEXT_SHARED_SECRET",
     "false",
 ).lower() in ("1", "true", "yes")
+WEBHOOK_REPLAY_TTL_SECONDS = int(os.getenv("WEBHOOK_REPLAY_TTL_SECONDS", "86400"))
+WEBHOOK_LOCAL_REPLAY_MAX_ENTRIES = int(os.getenv("WEBHOOK_LOCAL_REPLAY_MAX_ENTRIES", "10000"))
+_local_webhook_replays: dict[str, float] = {}
+
+
+def _claim_local_webhook_replay(webhook_id: str, *, now: float | None = None) -> bool:
+    current = time.monotonic() if now is None else now
+    expires_at = _local_webhook_replays.get(webhook_id)
+    if expires_at is not None and expires_at > current:
+        return False
+
+    if len(_local_webhook_replays) >= WEBHOOK_LOCAL_REPLAY_MAX_ENTRIES:
+        for key, expiry in list(_local_webhook_replays.items()):
+            if expiry <= current:
+                _local_webhook_replays.pop(key, None)
+        while len(_local_webhook_replays) >= WEBHOOK_LOCAL_REPLAY_MAX_ENTRIES:
+            _local_webhook_replays.pop(next(iter(_local_webhook_replays)))
+
+    _local_webhook_replays[webhook_id] = current + WEBHOOK_REPLAY_TTL_SECONDS
+    return True
+
+
+async def _webhook_is_duplicate(webhook_id: str) -> bool:
+    local_is_new = _claim_local_webhook_replay(webhook_id)
+    from app.services.redis_pool import get_redis
+
+    redis = get_redis()
+    if not redis:
+        return not local_is_new
+
+    try:
+        redis_is_new = await redis.set(
+            f"webhook_replay:{webhook_id}",
+            "1",
+            ex=WEBHOOK_REPLAY_TTL_SECONDS,
+            nx=True,
+        )
+        return not redis_is_new
+    except Exception as exc:
+        logger.warning("Redis webhook replay check failed; using bounded local fallback: %s", exc)
+        return not local_is_new
 
 
 def _bearer_token(request: Request) -> str:
@@ -82,6 +128,30 @@ def _verify_wc_signature(raw_body: bytes, signature: str, secret: str) -> bool:
     digest = hmac.new(secret.encode(), raw_body, hashlib.sha256).digest()
     expected = base64.b64encode(digest).decode()
     return hmac.compare_digest(expected, signature)
+
+
+def _decrypt_optional_webhook_secret(secret: str | None, *, provider: str) -> str:
+    if not secret:
+        return ""
+    try:
+        return decrypt_token(secret)
+    except Exception as exc:
+        logger.warning("%s webhook secret decrypt failed: %s", provider, exc)
+        return ""
+
+
+def _woocommerce_webhook_secret_for_client(client: CachedClient) -> str:
+    client_secret = _decrypt_optional_webhook_secret(
+        getattr(client, "woocommerce_webhook_secret", None),
+        provider="WooCommerce",
+    )
+    if client_secret:
+        return client_secret
+
+    global_secret = os.getenv("WC_WEBHOOK_SECRET", "") if ALLOW_WC_WEBHOOK_GLOBAL_SECRET_FALLBACK else ""
+    if global_secret:
+        logger.warning("[%s] Using global WooCommerce webhook secret fallback.", client.name)
+    return global_secret
 
 
 def _woocommerce_status_meets_threshold(received_status: str, configured_status: str) -> bool:
@@ -138,7 +208,7 @@ async def woocommerce_webhook(
     """
 
     # ─── API Key Authentication ───────────────────────────────────────
-    api_key = request.headers.get("x-api-key", "")
+    api_key = _client_api_key_from_request(request, provider="WooCommerce")
     if not api_key:
         raise HTTPException(status_code=401, detail="API Key missing")
 
@@ -149,7 +219,7 @@ async def woocommerce_webhook(
     client = _snapshot(client_row)
     raw_body = await request.body()
     signature = request.headers.get("x-wc-webhook-signature", "")
-    webhook_secret = os.getenv("WC_WEBHOOK_SECRET", "")
+    webhook_secret = _woocommerce_webhook_secret_for_client(client)
     if not webhook_secret and ALLOW_WC_WEBHOOK_API_KEY_SECRET_FALLBACK:
         logger.warning("Using legacy WooCommerce webhook API-key signature fallback.")
         webhook_secret = api_key
@@ -172,17 +242,10 @@ async def woocommerce_webhook(
         raise HTTPException(status_code=400, detail="Order ID not found in payload")
 
     # Webhook Replay Protection
-    from app.services.redis_pool import get_redis
-    redis = get_redis()
-    if redis:
-        webhook_id = request.headers.get("x-wc-webhook-id") or f"wc:{client.id}:{order_id}:{status}"
-        try:
-            is_new = await redis.set(f"webhook_replay:{webhook_id}", "1", ex=86400, nx=True)
-            if not is_new:
-                logger.info(f"[{client.name}] WooCommerce duplicate webhook ignored: {webhook_id}")
-                return {"status": "ignored", "detail": "Duplicate webhook delivery"}
-        except Exception as re_exc:
-            logger.warning(f"[{client.name}] Redis WooCommerce replay check failed: {re_exc}")
+    webhook_id = request.headers.get("x-wc-webhook-id") or f"wc:{client.id}:{order_id}:{status}"
+    if await _webhook_is_duplicate(webhook_id):
+        logger.info(f"[{client.name}] WooCommerce duplicate webhook ignored: {webhook_id}")
+        return {"status": "ignored", "detail": "Duplicate webhook delivery"}
 
     logger.info(f"[{client.name}] 📬 WooCommerce webhook: order #{order_id}, status: {status}")
 
@@ -333,17 +396,10 @@ async def shopify_webhook(
         raise HTTPException(status_code=400, detail="Shopify Order ID not found in payload")
 
     # Webhook Replay Protection
-    from app.services.redis_pool import get_redis
-    redis = get_redis()
-    if redis:
-        webhook_id = request.headers.get("x-shopify-webhook-id") or f"shopify:{client.id}:{order_id}:{body.get('updated_at')}"
-        try:
-            is_new = await redis.set(f"webhook_replay:{webhook_id}", "1", ex=86400, nx=True)
-            if not is_new:
-                logger.info(f"[{client.name}] Shopify duplicate webhook ignored: {webhook_id}")
-                return {"status": "ignored", "detail": "Duplicate webhook delivery"}
-        except Exception as re_exc:
-            logger.warning(f"[{client.name}] Redis Shopify replay check failed: {re_exc}")
+    webhook_id = request.headers.get("x-shopify-webhook-id") or f"shopify:{client.id}:{order_id}:{body.get('updated_at')}"
+    if await _webhook_is_duplicate(webhook_id):
+        logger.info(f"[{client.name}] Shopify duplicate webhook ignored: {webhook_id}")
+        return {"status": "ignored", "detail": "Duplicate webhook delivery"}
 
     logger.info(f"[{client.name}] 📬 Shopify webhook: order #{order_id} ({order_number})")
 
@@ -371,15 +427,15 @@ async def shopify_webhook(
                 and_(
                     PendingEvent.client_id == client.id,
                     PendingEvent.order_id.in_(possible_ids),
-                    PendingEvent.status.in_(["confirmed", "courier_booking_queued", "courier_booked"]),
                 )
             )
         )
-        if confirmed_check.scalar_one_or_none():
+        existing_closed = confirmed_check.scalar_one_or_none()
+        if existing_closed:
             return {
                 "status": "success",
                 "order_id": str(order_id),
-                "message": "Purchase event was already confirmed/processed.",
+                "message": f"Purchase event was already processed with status '{existing_closed.status}'.",
             }
 
     if pending:
@@ -557,6 +613,7 @@ async def shopify_webhook(
             order_id=f"shopify_purchase_{order_id}",
             event_data=event_payload,
             status="confirmed",
+            portal_state="confirmed",
             is_confirmed=True,
             confirmed_at=datetime.now(timezone.utc)
         )

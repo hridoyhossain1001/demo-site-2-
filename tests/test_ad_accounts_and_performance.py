@@ -8,11 +8,13 @@ os.environ.setdefault("ENCRYPTION_KEY", "ZFhnf1szwemka8kBbH9jPTC7oKBRTEv0EqWt1J8
 
 from app.security import decrypt_token
 from app.models.ad_account import AdAccount
+from app.models.ad_campaign import AdCampaign
 from app.routers.ad_accounts import (
     AdAccountCreate,
     connect_ad_account,
     list_ad_accounts,
-    disconnect_ad_account
+    disconnect_ad_account,
+    list_ad_campaigns,
 )
 from app.routers.analytics import ad_performance_analytics
 
@@ -22,6 +24,14 @@ class MockResult:
         self._value = value
 
     def scalar_one_or_none(self):
+        return self._value
+
+    def scalar(self):
+        if isinstance(self._value, list):
+            return self._value[0] if self._value else None
+        return self._value
+
+    def one(self):
         return self._value
 
     def scalars(self):
@@ -35,8 +45,9 @@ class MockResult:
 
 
 class MockDb:
-    def __init__(self, query_result=None, dialect_name="sqlite"):
+    def __init__(self, query_result=None, dialect_name="sqlite", execute_results=None):
         self.query_result = query_result
+        self.execute_results = list(execute_results or [])
         self.added = []
         self.deleted = []
         self.committed = False
@@ -46,6 +57,8 @@ class MockDb:
 
     async def execute(self, statement, *args, **kwargs):
         self.executed_statements.append(str(statement))
+        if self.execute_results:
+            return MockResult(self.execute_results.pop(0))
         return MockResult(self.query_result)
 
     def add(self, entity):
@@ -148,6 +161,20 @@ async def test_list_ad_accounts():
 
 
 @pytest.mark.anyio
+async def test_list_ad_campaigns_scopes_to_client_accounts():
+    account = AdAccount(id=3, client_id=42, platform="meta", external_account_id="act_1", account_name="Main Ads", access_token_enc="enc", account_currency="USD", account_timezone="UTC")
+    campaign = AdCampaign(id=7, ad_account_id=3, platform="meta", external_campaign_id="camp_1", name="June Sale", status="ACTIVE")
+    db = MockDb(query_result=[(campaign, account)])
+    client = SimpleNamespace(id=42)
+
+    response = await list_ad_campaigns(platform="meta", client=client, db=db)
+
+    assert len(response) == 1
+    assert response[0].external_campaign_id == "camp_1"
+    assert response[0].account_name == "Main Ads"
+
+
+@pytest.mark.anyio
 async def test_disconnect_ad_account_success():
     account = AdAccount(id=15, client_id=42, platform="meta", external_account_id="act_1", access_token_enc="enc", account_currency="USD", account_timezone="UTC")
     db = MockDb(query_result=account)
@@ -179,12 +206,18 @@ async def test_ad_performance_analytics_zero_metrics():
             self.browser_page_views = 0
             self.server_page_views = 0
 
-    db = MockDb(query_result=[MockPerformanceRow()])
+    db = MockDb(execute_results=[
+        [MockPerformanceRow()],
+        (1, datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        0,
+    ])
     client = SimpleNamespace(id=42)
 
     response = await ad_performance_analytics(client=client, db=db, days=7)
 
     assert response.status == "success"
+    assert response.connected_accounts == 1
+    assert response.last_synced_at == datetime(2026, 6, 1, tzinfo=timezone.utc)
     assert len(response.data) == 1
     row = response.data[0]
     assert row.campaign_id == "camp_123"
@@ -214,13 +247,18 @@ async def test_ad_performance_analytics_with_data():
             self.browser_page_views = 200
             self.server_page_views = 400
 
-    db = MockDb(query_result=[MockPerformanceRow()])
+    db = MockDb(execute_results=[
+        [MockPerformanceRow()],
+        (1, datetime(2026, 6, 1, tzinfo=timezone.utc)),
+        2,
+    ])
     client = SimpleNamespace(id=42)
 
     response = await ad_performance_analytics(client=client, db=db, days=14)
 
     assert response.status == "success"
     assert response.period_days == 14
+    assert response.missing_attribution_purchases == 2
     assert len(response.data) == 1
     row = response.data[0]
     assert row.campaign_id == "camp_789"
@@ -235,7 +273,14 @@ async def test_ad_performance_analytics_with_data():
 
 @pytest.mark.anyio
 async def test_ad_performance_query_scopes_campaign_aggregates():
-    db = MockDb(query_result=[], dialect_name="postgresql")
+    db = MockDb(
+        dialect_name="postgresql",
+        execute_results=[
+            [],
+            (0, None),
+            0,
+        ],
+    )
     client = SimpleNamespace(id=42)
 
     response = await ad_performance_analytics(client=client, db=db, days=7)

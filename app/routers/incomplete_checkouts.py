@@ -65,6 +65,8 @@ async def recover_open_checkouts_for_order(
     client_id: int,
     phone: str,
     order_id: str,
+    activity_window_start: datetime | None = None,
+    activity_window_end: datetime | None = None,
 ) -> int:
     """Mark only real abandoned/contacted leads as recovered.
 
@@ -77,13 +79,19 @@ async def recover_open_checkouts_for_order(
     except HTTPException:
         return 0
 
+    filters = [
+        IncompleteCheckout.client_id == client_id,
+        IncompleteCheckout.phone_hash == phone_hash,
+        IncompleteCheckout.status.in_(["active", "incomplete", "contacted"]),
+    ]
+    if activity_window_start is not None:
+        filters.append(IncompleteCheckout.last_activity_at >= activity_window_start)
+    if activity_window_end is not None:
+        filters.append(IncompleteCheckout.last_activity_at <= activity_window_end)
+
     result = await db.execute(
         select(IncompleteCheckout)
-        .where(
-            IncompleteCheckout.client_id == client_id,
-            IncompleteCheckout.phone_hash == phone_hash,
-            IncompleteCheckout.status.in_(["active", "incomplete", "contacted"]),
-        )
+        .where(*filters)
         .order_by(desc(IncompleteCheckout.last_activity_at), desc(IncompleteCheckout.id))
         .with_for_update()
     )
@@ -133,14 +141,14 @@ async def upsert_incomplete_checkout(
             IncompleteCheckout.client_id == client.id,
             IncompleteCheckout.visitor_id == visitor_id,
             IncompleteCheckout.phone_hash == phone_hash,
-            IncompleteCheckout.status.in_(["active", "incomplete", "contacted", "recovered"]),
+            IncompleteCheckout.status.in_(["active", "incomplete", "contacted", "recovered", "ignored"]),
         )
         .order_by(desc(IncompleteCheckout.last_activity_at), desc(IncompleteCheckout.id))
         .limit(1)
     )
     draft = result.scalar_one_or_none()
     now = datetime.now(timezone.utc)
-    if draft and draft.status == "recovered":
+    if draft and draft.status in {"recovered", "ignored"}:
         converted_at = draft.converted_at
         if converted_at and converted_at.tzinfo is None:
             converted_at = converted_at.replace(tzinfo=timezone.utc)

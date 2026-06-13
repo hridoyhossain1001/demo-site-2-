@@ -35,6 +35,14 @@ REQUIRE_COURIER_WEBHOOK_SECRET = os.getenv("REQUIRE_COURIER_WEBHOOK_SECRET", "tr
 COURIER_WEBHOOK_SECRET = os.getenv("COURIER_WEBHOOK_SECRET", "")
 STEADFAST_BEARER_TOKEN = os.getenv("STEADFAST_BEARER_TOKEN", "")
 PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET = os.getenv("PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET", "")
+ALLOW_GLOBAL_COURIER_WEBHOOK_SECRET_FALLBACK = os.getenv(
+    "ALLOW_GLOBAL_COURIER_WEBHOOK_SECRET_FALLBACK",
+    "false",
+).lower() in ("1", "true", "yes")
+ALLOW_GLOBAL_STEADFAST_WEBHOOK_TOKEN_FALLBACK = os.getenv(
+    "ALLOW_GLOBAL_STEADFAST_WEBHOOK_TOKEN_FALLBACK",
+    "false",
+).lower() in ("1", "true", "yes")
 
 
 def _bearer_token(request: Request) -> str:
@@ -171,6 +179,8 @@ async def public_courier_tracking(
 def _verify_courier_webhook_secret(request: Request) -> None:
     if not REQUIRE_COURIER_WEBHOOK_SECRET:
         return
+    if not ALLOW_GLOBAL_COURIER_WEBHOOK_SECRET_FALLBACK:
+        raise HTTPException(status_code=401, detail="Client courier webhook secret is required")
     provided = _webhook_secret_from_request(request, provider="Courier")
     if not COURIER_WEBHOOK_SECRET or not hmac.compare_digest(provided, COURIER_WEBHOOK_SECRET):
         raise HTTPException(status_code=401, detail="Invalid courier webhook secret")
@@ -179,10 +189,13 @@ def _verify_courier_webhook_secret(request: Request) -> None:
 def _verify_steadfast_bearer_token(request: Request, expected_token: str | None = None) -> None:
     authorization = request.headers.get("authorization") or ""
     scheme, _, provided = authorization.partition(" ")
+    token = expected_token
+    if not token and ALLOW_GLOBAL_STEADFAST_WEBHOOK_TOKEN_FALLBACK:
+        token = STEADFAST_BEARER_TOKEN
     if (
         scheme.lower() != "bearer"
-        or not (expected_token or STEADFAST_BEARER_TOKEN)
-        or not hmac.compare_digest(provided, expected_token or STEADFAST_BEARER_TOKEN)
+        or not token
+        or not hmac.compare_digest(provided, token)
     ):
         raise HTTPException(status_code=401, detail="Invalid SteadFast webhook bearer token")
 
@@ -253,6 +266,32 @@ def _append_status_history(
     courier_order.status_history = history[-100:]
 
 
+def _needs_terminal_event_retry(courier_order: CourierOrder, mapped_status: str) -> bool:
+    if not courier_order.pending_event_id:
+        return False
+    if mapped_status == "delivered":
+        return not bool(courier_order.purchase_event_sent)
+    if mapped_status in ("returned", "cancelled"):
+        return bool(courier_order.purchase_event_sent) and not bool(courier_order.refund_event_sent)
+    return False
+
+
+def _mark_terminal_side_effect_failed(
+    courier_order: CourierOrder,
+    *,
+    mapped_status: str,
+    raw_status: str,
+    reason: str,
+) -> None:
+    _append_status_history(
+        courier_order,
+        mapped_status=mapped_status,
+        raw_status=raw_status,
+        outcome="side_effect_failed",
+        reason=reason,
+    )
+
+
 async def process_courier_status_change(
     db: AsyncSession,
     courier_order: CourierOrder,
@@ -279,7 +318,12 @@ async def process_courier_status_change(
         db.add(courier_order)
         return {"status": "ignored", "reason": "unknown_status", "current_status": old_status}
 
-    if old_status == mapped_status:
+    duplicate_terminal_retry = old_status == mapped_status and _needs_terminal_event_retry(
+        courier_order,
+        mapped_status,
+    )
+
+    if old_status == mapped_status and not duplicate_terminal_retry:
         logger.info(
             "Ignoring duplicate courier status provider=%s order=%s status=%s",
             provider,
@@ -288,7 +332,7 @@ async def process_courier_status_change(
         )
         return {"status": "duplicate", "current_status": old_status}
 
-    if not CourierService.should_apply_status_transition(old_status, mapped_status):
+    if not duplicate_terminal_retry and not CourierService.should_apply_status_transition(old_status, mapped_status):
         logger.warning(
             "Ignoring stale courier status provider=%s order=%s old=%s new=%s raw_status=%r",
             provider,
@@ -307,15 +351,13 @@ async def process_courier_status_change(
         db.add(courier_order)
         return {"status": "ignored", "reason": "stale_transition", "current_status": old_status}
 
-    # Update order details
-    courier_order.courier_status = mapped_status
-
-    # Append to history
-    _append_status_history(
-        courier_order,
-        mapped_status=mapped_status,
-        raw_status=new_raw_status,
-    )
+    if not duplicate_terminal_retry:
+        courier_order.courier_status = mapped_status
+        _append_status_history(
+            courier_order,
+            mapped_status=mapped_status,
+            raw_status=new_raw_status,
+        )
 
     client_result = await db.execute(select(Client).where(Client.id == courier_order.client_id))
     client = client_result.scalar_one_or_none()
@@ -331,6 +373,7 @@ async def process_courier_status_change(
 
     if client and pending_event:
         client_snapshot = _snapshot(client)
+        side_effect_error = None
 
         # 1. Handle DELIVERED (trigger auto Purchase event)
         if mapped_status == "delivered" and not courier_order.purchase_event_sent and has_growth_access(client):
@@ -344,7 +387,14 @@ async def process_courier_status_change(
                 pending_event.portal_state = "confirmed"
                 pending_event.is_confirmed = True
             except Exception as e:
+                side_effect_error = str(e)
                 logger.error(f"Failed to queue auto Purchase event for delivered order {courier_order.order_id}: {e}")
+                _mark_terminal_side_effect_failed(
+                    courier_order,
+                    mapped_status=mapped_status,
+                    raw_status=new_raw_status,
+                    reason="purchase_event_queue_failed",
+                )
 
         # 2. Handle RETURNED or CANCELLED (trigger Refund event to Facebook)
         elif mapped_status in ("returned", "cancelled"):
@@ -356,10 +406,30 @@ async def process_courier_status_change(
                     await _queue_refund_event(client_snapshot, pending_event, db)
                     courier_order.refund_event_sent = True
                 except Exception as e:
+                    side_effect_error = str(e)
                     logger.error(f"Failed to queue Refund event for order {courier_order.order_id}: {e}")
+                    _mark_terminal_side_effect_failed(
+                        courier_order,
+                        mapped_status=mapped_status,
+                        raw_status=new_raw_status,
+                        reason="refund_event_queue_failed",
+                    )
 
             pending_event.status = "cancelled"
             pending_event.portal_state = "cancelled"
+
+        elif mapped_status == "partial_delivered":
+            pending_event.portal_state = "partial_delivered"
+
+        if side_effect_error:
+            db.add(courier_order)
+            db.add(pending_event)
+            return {
+                "status": "applied_pending_side_effect",
+                "previous_status": old_status,
+                "current_status": mapped_status,
+                "side_effect_error": side_effect_error[:200],
+            }
 
     db.add(courier_order)
     if pending_event:
@@ -458,7 +528,6 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     # সঠিকভাবে respond না করলে webhook save হয় না।
     event_type = payload.get("event") or payload.get("type") or ""
     received_sig = request.headers.get("x-pathao-signature") or request.headers.get("x-signature") or ""
-    integration_response_secret = PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET
 
     def pathao_response(content: dict, *, status_code: int = 200, secret: str | None = None) -> JSONResponse:
         response = JSONResponse(status_code=status_code, content=content)
@@ -500,7 +569,6 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         logger.warning(f"Pathao webhook received invalid data: {payload}")
         return pathao_response(
             {"status": "ignored", "reason": "missing consignment_id or status"},
-            secret=integration_response_secret,
         )
 
     logger.info(f"Pathao webhook received for {consignment_id}: status={status}")
@@ -520,7 +588,6 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         logger.warning(f"Pathao courier order not found for consignment: {consignment_id}")
         return pathao_response(
             {"status": "ignored", "reason": "order not found"},
-            secret=integration_response_secret,
         )
 
     # Get associated client and decrypt secret key
@@ -563,8 +630,7 @@ async def pathao_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     processing = await process_courier_status_change(db, courier_order, status)
     await db.commit()
 
-    # Pathao expects the integration secret in response header for every webhook call too
-    return pathao_response(processing, secret=webhook_secret)
+    return pathao_response(processing)
 
 
 @router.post("/v1/webhook/redx")

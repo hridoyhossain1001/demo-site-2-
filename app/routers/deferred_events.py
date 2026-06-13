@@ -17,7 +17,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select, update, and_, func as sql_func, cast, Numeric
+from sqlalchemy import select, update, and_, func as sql_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -148,6 +148,24 @@ class DeferredSummaryResponse(BaseModel):
     expired: int
     pending_value: float
     pending_oldest_age_hours: Optional[float] = None
+
+
+def _safe_numeric_value(value) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        return float(str(value).strip().replace(",", ""))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pending_event_value(event_data: dict | None) -> float:
+    if not isinstance(event_data, dict):
+        return 0.0
+    custom_data = event_data.get("custom_data")
+    if not isinstance(custom_data, dict):
+        return 0.0
+    return _safe_numeric_value(custom_data.get("value"))
 
 
 # ─── Helper: Queue confirmed event for worker delivery ───────────────────────
@@ -686,18 +704,19 @@ async def deferred_purchase_summary(
     )
     counts = {status: int(count or 0) for status, count in status_result}
 
-    sum_and_min_stmt = select(
-        sql_func.sum(cast(PendingEvent.event_data["custom_data"]["value"].as_string(), Numeric)),
-        sql_func.min(PendingEvent.created_at)
+    pending_summary_stmt = select(
+        PendingEvent.event_data,
+        PendingEvent.created_at,
     ).where(
         and_(
             PendingEvent.client_id == client.id,
             PendingEvent.status == "pending"
         )
     )
-    sum_and_min_res = await db.execute(sum_and_min_stmt)
-    sum_val, oldest_created = sum_and_min_res.fetchone()
-    pending_value = float(sum_val or 0.0)
+    pending_summary_res = await db.execute(pending_summary_stmt)
+    pending_rows = pending_summary_res.all()
+    pending_value = sum(_pending_event_value(event_data) for event_data, _created_at in pending_rows)
+    oldest_created = min((created_at for _event_data, created_at in pending_rows if created_at), default=None)
 
     oldest_age_hours = None
     if oldest_created:

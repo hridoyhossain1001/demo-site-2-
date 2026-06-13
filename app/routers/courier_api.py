@@ -221,8 +221,8 @@ async def update_courier_settings(
     await db.commit()
     
     # Clear client cache so change takes effect immediately
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
     
     return {"message": "Courier settings updated successfully."}
 
@@ -517,10 +517,46 @@ async def cancel_courier_order(
         local_only = cancel_result.get("local_only", False)
 
         if not cancel_result.get("success"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Pathao cancel failed: {cancel_result.get('error', 'Unknown error')}"
+            failure_error = cancel_result.get("error")
+            failure_message = (
+                f"Pathao cancel failed: {failure_error}. Order remains active on Pathao; cancel manually from the Pathao merchant panel."
+                if failure_error
+                else cancel_result.get("message") or "Pathao cancel failed. Order remains active on Pathao."
             )
+            courier_order.courier_status = "cancel_failed_provider_active"
+            history = courier_order.status_history or []
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "status": "cancel_failed_provider_active",
+                "raw_status": "pathao_cancel_failed",
+                "time": datetime.now(timezone.utc).isoformat(),
+                "error": failure_message,
+                "provider_active": True,
+            })
+            courier_order.status_history = history
+            db.add(courier_order)
+
+            if courier_order.pending_event_id:
+                pe_result = await db.execute(
+                    select(PendingEvent).where(PendingEvent.id == courier_order.pending_event_id)
+                )
+                pending_event = pe_result.scalar_one_or_none()
+                if pending_event:
+                    pending_event.status = "cancel_failed_provider_active"
+                    pending_event.portal_state = "processing"
+                    db.add(pending_event)
+
+            await db.commit()
+            return {
+                "success": False,
+                "message": failure_message,
+                "local_only": False,
+                "needs_manual_cancel": True,
+                "state": "cancel_failed_provider_active",
+                "order_id": courier_order.order_id,
+                "courier_provider": courier_order.courier_provider,
+            }
 
     elif courier_order.courier_provider == "steadfast":
         # SteadFast: no cancel API, local-only

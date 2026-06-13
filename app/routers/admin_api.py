@@ -35,7 +35,7 @@ from app.security import encrypt_token
 from app.services.auth_service import verify_admin_password
 from app.services.webhook_service import _webhook_url_allowed
 from app.services.courier_booking_service import requeue_failed_booking_job
-from app.dependencies import clear_client_cache
+from app.dependencies import invalidate_client_cache
 from app.utils.display import normalize_domain_input, display_domain_url, mask_secret
 from app.routers.admin_views import log_admin_action
 from app.limiter import limiter
@@ -70,6 +70,14 @@ ADMIN_CSRF_COOKIE = os.getenv("ADMIN_CSRF_COOKIE", "buykori_admin_csrf")
 ADMIN_CSRF_HEADER = os.getenv("ADMIN_CSRF_HEADER", "X-Admin-CSRF-Token")
 ADMIN_CSRF_PREFIX = "admin-csrf"
 SAFE_ADMIN_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def admin_session_secret() -> str:
+    secret = os.getenv("ADMIN_JWT_SECRET", "")
+    if not secret:
+        raise HTTPException(status_code=503, detail="Admin JWT secret is not configured")
+    return secret
+
 
 class AdminClientCreate(BaseModel):
     name: str
@@ -160,7 +168,7 @@ def verify_admin_api_key(
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
         try:
-            payload = decode_jwt(token, admin_key)
+            payload = decode_jwt(token, admin_session_secret())
             if payload.get("sub") == "admin":
                 return "admin-bearer"
         except Exception as e:
@@ -168,12 +176,13 @@ def verify_admin_api_key(
 
     cookie_token = request.cookies.get(ADMIN_SESSION_COOKIE)
     if cookie_token:
+        session_secret = admin_session_secret()
         try:
-            payload = decode_jwt(cookie_token, admin_key)
+            payload = decode_jwt(cookie_token, session_secret)
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid or expired admin session")
         if payload.get("sub") == "admin":
-            require_admin_csrf(request, admin_key)
+            require_admin_csrf(request, session_secret)
             return "admin-cookie"
 
     raise HTTPException(status_code=403, detail="Admin access required")
@@ -267,13 +276,19 @@ def clear_admin_csrf_cookie(response: Response) -> None:
     )
 
 
-def client_to_api_dict(client: Client, event_total: int = 0, last_event_at=None, mask_keys: bool = False) -> dict:
+def client_to_api_dict(
+    client: Client,
+    event_total: int = 0,
+    last_event_at=None,
+    mask_keys: bool = False,
+    mask_portal_key: bool = False,
+) -> dict:
     api_key = mask_secret(client.api_key) if mask_keys else client.api_key
     public_key = getattr(client, "public_key", None)
     if public_key and mask_keys:
         public_key = mask_secret(public_key)
     portal_key = getattr(client, "portal_key", None)
-    if portal_key and mask_keys:
+    if portal_key and (mask_keys or mask_portal_key):
         portal_key = mask_secret(portal_key)
     plan = plan_summary(client)
 
@@ -1017,7 +1032,7 @@ async def admin_api_transfer_site_binding(
     target = await db.get(Client, payload.target_client_id)
     if target and not domain_includes_root(target.domain, new_binding.root_domain):
         target.domain = append_domain_root(target.domain, new_binding.root_domain)
-        clear_client_cache(target.api_key)
+        await invalidate_client_cache(target.api_key)
     await log_admin_action(
         db,
         request,
@@ -1093,7 +1108,7 @@ async def admin_api_create_client(
     await db.refresh(client)
     await log_admin_action(db, request, actor, "client.api_added", client.id, f"Client {name} added from admin frontend")
     await db.commit()
-    return {"status": "success", "client": client_to_api_dict(client)}
+    return {"status": "success", "client": client_to_api_dict(client, mask_portal_key=True)}
 
 @router.patch("/admin/api/clients/{client_id}")
 @limiter.limit("20/minute")
@@ -1164,10 +1179,10 @@ async def admin_api_update_client(
 
     await db.commit()
     await db.refresh(client)
-    clear_client_cache(old_api_key)
+    await invalidate_client_cache(old_api_key)
     await log_admin_action(db, request, actor, "client.api_updated", client.id, f"Client {client.name} updated from admin frontend")
     await db.commit()
-    return {"status": "success", "client": client_to_api_dict(client)}
+    return {"status": "success", "client": client_to_api_dict(client, mask_portal_key=True)}
 
 @router.post("/admin/api/clients/{client_id}/plan")
 @limiter.limit("20/minute")
@@ -1210,10 +1225,10 @@ async def admin_api_update_plan(
 
     await db.commit()
     await db.refresh(client)
-    clear_client_cache(old_api_key)
+    await invalidate_client_cache(old_api_key)
     await log_admin_action(db, request, actor, log_action, client.id, details)
     await db.commit()
-    return {"status": "success", "client": client_to_api_dict(client)}
+    return {"status": "success", "client": client_to_api_dict(client, mask_portal_key=True)}
 
 @router.get("/admin/api/clients/{client_id}")
 async def admin_api_get_client(
@@ -1226,9 +1241,9 @@ async def admin_api_get_client(
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
-    data = client_to_api_dict(client)
+    data = client_to_api_dict(client, mask_keys=True, mask_portal_key=True)
     data["access_token"] = mask_secret(client.access_token) if client.access_token else ""
-    data["portal_key"] = client.portal_key
+    data["portal_key_masked"] = bool(client.portal_key)
     data["public_key"] = getattr(client, "public_key", None)
     return {"status": "success", "client": data}
 
@@ -1400,8 +1415,8 @@ async def admin_api_rotate_key(
         client.old_api_key = old_key
         client.api_key_rotated_at = datetime.now(timezone.utc)
         client.api_key = secrets.token_urlsafe(32)
-        clear_client_cache(old_key)
-        clear_client_cache(client.api_key)
+        await invalidate_client_cache(old_key)
+        await invalidate_client_cache(client.api_key)
     elif key_type == "portal_key":
         client.portal_key = secrets.token_urlsafe(16)
     elif key_type == "public_key" and hasattr(client, "public_key"):
@@ -1452,7 +1467,7 @@ async def admin_api_delete_client(
     await db.execute(sql_delete(ClientUser).where(ClientUser.client_id == client_id))
 
     await db.delete(client)
-    clear_client_cache(client_api_key)
+    await invalidate_client_cache(client_api_key)
 
     await log_admin_action(db, request, actor, "client.deleted", client_id, f"Client {client_name} deleted via API")
     await db.commit()
@@ -1468,8 +1483,9 @@ async def admin_api_login(request: Request, payload: AdminLoginRequest, response
     admin_user = os.getenv("ADMIN_USERNAME", "admin")
     admin_pass = os.getenv("ADMIN_PASSWORD")
     admin_key = os.getenv("ADMIN_API_KEY")
+    session_secret = os.getenv("ADMIN_JWT_SECRET")
 
-    if not admin_pass or not admin_key:
+    if not admin_pass or not admin_key or not session_secret:
         raise HTTPException(
             status_code=500,
             detail="Admin authentication is not configured on the server."
@@ -1489,8 +1505,8 @@ async def admin_api_login(request: Request, payload: AdminLoginRequest, response
         "sub": "admin",
         "exp": int(time.time()) + ADMIN_SESSION_SECONDS
     }
-    jwt_token = create_jwt(token_payload, admin_key)
-    csrf_token = create_admin_csrf_token(admin_key)
+    jwt_token = create_jwt(token_payload, session_secret)
+    csrf_token = create_admin_csrf_token(session_secret)
     set_admin_session_cookie(response, jwt_token)
     set_admin_csrf_cookie(response, csrf_token)
 
@@ -1610,6 +1626,8 @@ async def admin_api_events(
             "status": "Success" if log.status == "success" else "Failed",
             "httpCode": 200 if log.status == "success" else 400,
             "deduplicationKey": log.event_id or f"did_{log.id}",
+            "isReconstructedSample": True,
+            "sampleNotice": "Payload, headers, HTTP code, and upstream response are reconstructed from EventLog fields; they are not the original request/response.",
             "payload": {
                 "event_name": display_event_name,
                 "event_time": int(log.created_at.timestamp()) if log.created_at else int(datetime.now().timestamp()),

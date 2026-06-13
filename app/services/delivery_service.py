@@ -262,6 +262,8 @@ async def deliver_events_to_platforms(
         return {
             "primary_platform": "None",
             "result": {"ok": True, "message": "Filtered by custom event routing rules"},
+            "primary_events": [],
+            "filtered_events": events,
             "_tasks": [],
         }
 
@@ -279,6 +281,7 @@ async def deliver_events_to_platforms(
     if facebook_enabled:
         result = await send_to_facebook(client, facebook_events)
         primary_platform = "Facebook"
+        primary_events = facebook_events
     elif tiktok_enabled:
         tiktok_result = await send_to_tiktok(client, tiktok_events)
         if not tiktok_result or tiktok_result.get("code") not in (0, None):
@@ -286,6 +289,7 @@ async def deliver_events_to_platforms(
         result = tiktok_result
         primary_tiktok_sent = True
         primary_platform = "TikTok"
+        primary_events = tiktok_events
     elif ga4_enabled:
         ga4_result = await send_to_ga4(
             events=ga4_events_data,
@@ -300,6 +304,7 @@ async def deliver_events_to_platforms(
         result = ga4_result
         primary_ga4_sent = True
         primary_platform = "GA4"
+        primary_events = ga4_events
     elif webhook_enabled:
         webhook_errors = []
         for event_data in webhook_events_data:
@@ -319,6 +324,7 @@ async def deliver_events_to_platforms(
             raise RuntimeError(f"Webhook send failed for: {', '.join(webhook_errors)}")
         result = {"ok": True, "sent_count": len(webhook_events_data)}
         primary_platform = "Webhook"
+        primary_events = events
 
     # Fire secondary sends in parallel as background tasks
     secondary_tasks = []
@@ -361,5 +367,7 @@ async def deliver_events_to_platforms(
     return {
         "primary_platform": primary_platform,
         "result": result,
+        "primary_events": primary_events,
+        "filtered_events": [event for event in events if event not in primary_events],
         "_tasks": tasks,
     }

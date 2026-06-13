@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -170,6 +171,13 @@ def test_cached_client_blocks_stale_paid_toggles_after_trial_expiry():
     assert cached.enable_ga4 is False
     assert cached.deferred_purchase is False
     assert cached.monthly_limit == FREE_EVENT_LIMIT
+
+
+def test_product_rules_document_plan_service_as_entitlement_source():
+    rules = (Path(__file__).resolve().parents[1] / "docs" / "PRODUCT_RULES.md").read_text(encoding="utf-8")
+
+    assert "Effective event quotas and feature access come from `app.services.plan_service`" in rules
+    assert "Expired trials downgrade to the free entitlement set" in rules
 
 
 class _FakeOrderRecordDb:

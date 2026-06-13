@@ -1,0 +1,2 @@
+17 2 * * * BACKUP_RETENTION_DAYS=30 /var/www/buykori-adsync/scripts/ops/db_backup.sh >> /var/www/buykori-adsync/.backups/backup.log 2>&1
+0 3 * * * /var/www/buykori-adsync/scripts/ops/migration_readiness.sh > /var/www/buykori-adsync/.backups/readiness.log 2>&1

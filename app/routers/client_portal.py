@@ -462,8 +462,8 @@ async def client_settings_update(
     await db.commit()
 
     # Clear cache so changes take effect immediately
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     from urllib.parse import urlencode
     q = urlencode({"settings_msg": "✅ Settings সফলভাবে আপডেট হয়েছে!", "settings_type": "success"})

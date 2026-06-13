@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import AsyncMock
 from sqlalchemy import inspect
 from starlette.requests import Request
 
@@ -190,7 +191,7 @@ async def test_redx_legacy_query_token_still_works_with_warning(monkeypatch, cap
 
 
 @pytest.mark.asyncio
-async def test_pathao_status_callback_uses_client_webhook_secret_without_internal_guard(monkeypatch):
+async def test_pathao_status_callback_uses_client_webhook_secret_without_echoing_it(monkeypatch):
     order = _order(courier_provider="pathao", courier_status="pending")
     client = SimpleNamespace(pathao_webhook_secret="encrypted-webhook-secret")
     db = _ResultsDb(order, client)
@@ -211,7 +212,7 @@ async def test_pathao_status_callback_uses_client_webhook_secret_without_interna
     response = await courier_webhook.pathao_webhook(request, db)
 
     assert response.status_code == 200
-    assert response.headers["X-Pathao-Merchant-Webhook-Integration-Secret"] == "webhook-secret"
+    assert "X-Pathao-Merchant-Webhook-Integration-Secret" not in response.headers
     assert db.committed is True
     assert client.pathao_webhook_verified_at is not None
     assert "pathao" in db.statements[0].compile().params.values()
@@ -236,7 +237,7 @@ async def test_legacy_public_tracking_returns_not_found_for_ambiguous_reference(
 
 
 @pytest.mark.asyncio
-async def test_pathao_panel_delivered_test_returns_configured_header_for_unknown_sample_order(monkeypatch):
+async def test_pathao_unknown_sample_order_does_not_echo_integration_secret(monkeypatch):
     monkeypatch.setattr(courier_webhook, "PATHAO_MERCHANT_WEBHOOK_INTEGRATION_SECRET", "configured-integration-secret")
     request = _request(
         b'{"consignment_id":"DL121224VS8TTJ","event":"order.delivered"}',
@@ -246,7 +247,7 @@ async def test_pathao_panel_delivered_test_returns_configured_header_for_unknown
     response = await courier_webhook.pathao_webhook(request, _EmptyQueryDb())
 
     assert response.status_code == 200
-    assert response.headers["X-Pathao-Merchant-Webhook-Integration-Secret"] == "configured-integration-secret"
+    assert "X-Pathao-Merchant-Webhook-Integration-Secret" not in response.headers
     assert response.body == b'{"status":"ignored","reason":"order not found"}'
 
 
@@ -303,6 +304,81 @@ async def test_duplicate_status_returns_without_history_growth():
     assert result == {"status": "duplicate", "current_status": "in_transit"}
     assert order.status_history == []
     assert db.added == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_delivered_retries_missing_purchase_event(monkeypatch):
+    order = _order(
+        courier_status="delivered",
+        pending_event_id=77,
+        purchase_event_sent=False,
+        status_history=[{"status": "delivered"}],
+    )
+    client = SimpleNamespace(id=1, name="Growth Client")
+    pending = SimpleNamespace(
+        id=77,
+        order_id="1001",
+        status="pending",
+        portal_state="courier_booked",
+        is_confirmed=False,
+        confirmed_at=None,
+    )
+    db = _ResultsDb(client, pending)
+    queue_confirmed = AsyncMock()
+    monkeypatch.setattr(courier_webhook, "has_growth_access", lambda _client: True)
+    monkeypatch.setattr(courier_webhook, "_snapshot", lambda row: row)
+    monkeypatch.setattr(courier_webhook, "_queue_confirmed_event", queue_confirmed)
+
+    result = await courier_webhook.process_courier_status_change(db, order, "delivered")
+
+    assert result == {
+        "status": "applied",
+        "previous_status": "delivered",
+        "current_status": "delivered",
+    }
+    queue_confirmed.assert_awaited_once_with(client, pending, db)
+    assert order.purchase_event_sent is True
+    assert pending.status == "confirmed"
+    assert pending.portal_state == "confirmed"
+    assert pending.is_confirmed is True
+    assert order.status_history == [{"status": "delivered"}]
+    assert db.added == [order, pending]
+
+
+@pytest.mark.asyncio
+async def test_delivered_queue_failure_remains_retryable(monkeypatch):
+    order = _order(
+        courier_status="in_transit",
+        pending_event_id=77,
+        purchase_event_sent=False,
+    )
+    client = SimpleNamespace(id=1, name="Growth Client")
+    pending = SimpleNamespace(
+        id=77,
+        order_id="1001",
+        status="pending",
+        portal_state="courier_booked",
+        is_confirmed=False,
+        confirmed_at=None,
+    )
+    db = _ResultsDb(client, pending)
+    monkeypatch.setattr(courier_webhook, "has_growth_access", lambda _client: True)
+    monkeypatch.setattr(courier_webhook, "_snapshot", lambda row: row)
+    monkeypatch.setattr(
+        courier_webhook,
+        "_queue_confirmed_event",
+        AsyncMock(side_effect=RuntimeError("queue unavailable")),
+    )
+
+    result = await courier_webhook.process_courier_status_change(db, order, "delivered")
+
+    assert result["status"] == "applied_pending_side_effect"
+    assert result["current_status"] == "delivered"
+    assert order.courier_status == "delivered"
+    assert order.purchase_event_sent is False
+    assert pending.status == "pending"
+    assert order.status_history[-1]["outcome"] == "side_effect_failed"
+    assert order.status_history[-1]["reason"] == "purchase_event_queue_failed"
 
 
 @pytest.mark.asyncio

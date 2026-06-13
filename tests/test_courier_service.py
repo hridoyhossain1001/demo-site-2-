@@ -1,7 +1,7 @@
 import pytest
 
 from app.services import courier_service
-from app.services.courier_service import CourierService
+from app.services.courier_service import CourierService, CourierServiceException
 
 
 class FakeResponse:
@@ -221,6 +221,179 @@ async def test_send_to_pathao_live_lets_pathao_resolve_optional_location_ids(mon
     assert "recipient_city" not in http.request["json"]
     assert "recipient_zone" not in http.request["json"]
     assert "recipient_area" not in http.request["json"]
+
+
+@pytest.mark.asyncio
+async def test_pathao_location_resolution_does_not_fallback_to_dhaka(monkeypatch):
+    with pytest.raises(CourierServiceException, match="could not be resolved"):
+        await CourierService.resolve_pathao_location(
+            "token",
+            "House 12, Unknown Market",
+            base_url="https://courier-api-sandbox.pathao.com",
+        )
+
+    async def fake_empty_cities(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(CourierService, "_get_pathao_cities", fake_empty_cities)
+    with pytest.raises(CourierServiceException, match="city list is empty"):
+        await CourierService.resolve_pathao_location(
+            "token",
+            "House 1, Dhaka",
+            base_url="https://courier-api-sandbox.pathao.com",
+        )
+
+
+@pytest.mark.asyncio
+async def test_pathao_location_resolution_does_not_default_missing_zone_or_area(monkeypatch):
+    async def fake_cities(*_args, **_kwargs):
+        return [{"city_id": 7, "city_name": "Dhaka"}]
+
+    async def fake_empty_zones(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(CourierService, "_get_pathao_cities", fake_cities)
+    monkeypatch.setattr(CourierService, "_get_pathao_zones", fake_empty_zones)
+
+    with pytest.raises(CourierServiceException, match="No Pathao zones"):
+        await CourierService.resolve_pathao_location(
+            "token",
+            "House 1, Dhaka",
+            base_url="https://courier-api-sandbox.pathao.com",
+        )
+
+    async def fake_zones(*_args, **_kwargs):
+        return [{"zone_id": 10, "zone_name": "Mirpur"}]
+
+    async def fake_empty_areas(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(CourierService, "_get_pathao_zones", fake_zones)
+    monkeypatch.setattr(CourierService, "_get_pathao_areas", fake_empty_areas)
+
+    with pytest.raises(CourierServiceException, match="No Pathao areas"):
+        await CourierService.resolve_pathao_location(
+            "token",
+            "House 1, Mirpur, Dhaka",
+            base_url="https://courier-api-sandbox.pathao.com",
+        )
+
+
+@pytest.mark.asyncio
+async def test_pathao_location_resolution_requires_zone_and_area_match(monkeypatch):
+    async def fake_cities(*_args, **_kwargs):
+        return [{"city_id": 7, "city_name": "Dhaka"}]
+
+    async def fake_zones(*_args, **_kwargs):
+        return [{"zone_id": 10, "zone_name": "Mirpur"}]
+
+    async def fake_areas(*_args, **_kwargs):
+        return [{"area_id": 25, "area_name": "Mirpur DOHS"}]
+
+    monkeypatch.setattr(CourierService, "_get_pathao_cities", fake_cities)
+    monkeypatch.setattr(CourierService, "_get_pathao_zones", fake_zones)
+    monkeypatch.setattr(CourierService, "_get_pathao_areas", fake_areas)
+
+    with pytest.raises(CourierServiceException, match="zone could not be resolved"):
+        await CourierService.resolve_pathao_location(
+            "token",
+            "House 1, Dhaka",
+            base_url="https://courier-api-sandbox.pathao.com",
+        )
+
+    with pytest.raises(CourierServiceException, match="area could not be resolved"):
+        await CourierService.resolve_pathao_location(
+            "token",
+            "House 1, Mirpur, Dhaka",
+            base_url="https://courier-api-sandbox.pathao.com",
+        )
+
+    assert await CourierService.resolve_pathao_location(
+        "token",
+        "House 1, Mirpur DOHS, Dhaka",
+        base_url="https://courier-api-sandbox.pathao.com",
+    ) == (7, 10, 25)
+
+
+@pytest.mark.asyncio
+async def test_send_to_pathao_sandbox_requires_explicit_location_ids(monkeypatch):
+    async def fake_get_pathao_token(*_args, **_kwargs):
+        return "sandbox-token"
+
+    monkeypatch.setattr(CourierService, "get_pathao_token", fake_get_pathao_token)
+
+    result = await CourierService.send_to_pathao(
+        client_id="client-id",
+        client_secret="client-secret",
+        email="merchant@example.com",
+        password="password",
+        store_id="123",
+        recipient_name="Customer",
+        recipient_phone="01837224409",
+        recipient_address="House 1, Dhaka",
+        cod_amount=90,
+        merchant_order_id="1003",
+        base_url="https://courier-api-sandbox.pathao.com",
+    )
+
+    assert result["success"] is False
+    assert "requires explicit recipient_city" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_pathao_auth_failure_keeps_provider_active(monkeypatch):
+    async def fake_get_pathao_token(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(CourierService, "get_pathao_token", fake_get_pathao_token)
+
+    result = await CourierService.cancel_pathao_order(
+        client_id="client-id",
+        client_secret="client-secret",
+        email="merchant@example.com",
+        password="password",
+        consignment_id="12345",
+    )
+
+    assert result["success"] is False
+    assert result["local_only"] is False
+    assert result["provider_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_pathao_body_error_keeps_provider_active(monkeypatch):
+    class PathaoCancelErrorResponse:
+        status_code = 200
+        text = '{"error":true,"message":"Unauthorized!"}'
+
+        def json(self):
+            return {"error": True, "message": "Unauthorized!"}
+
+    class PathaoCancelHttpClient:
+        async def post(self, *_args, **_kwargs):
+            return PathaoCancelErrorResponse()
+
+    async def fake_get_http_client():
+        return PathaoCancelHttpClient()
+
+    async def fake_get_pathao_token(*_args, **_kwargs):
+        return "token"
+
+    monkeypatch.setattr(courier_service, "get_http_client", fake_get_http_client)
+    monkeypatch.setattr(CourierService, "get_pathao_token", fake_get_pathao_token)
+
+    result = await CourierService.cancel_pathao_order(
+        client_id="client-id",
+        client_secret="client-secret",
+        email="merchant@example.com",
+        password="password",
+        consignment_id="12345",
+    )
+
+    assert result["success"] is False
+    assert result["local_only"] is False
+    assert result["provider_active"] is True
+    assert result["error"] == "Unauthorized!"
 
 
 @pytest.mark.asyncio

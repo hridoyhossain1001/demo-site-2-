@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_client, CachedClient
 from app.models.ad_account import AdAccount
+from app.models.ad_campaign import AdCampaign
 from app.security import encrypt_token
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,16 @@ class AdAccountResponse(BaseModel):
     model_config = {
         "from_attributes": True
     }
+
+
+class AdCampaignResponse(BaseModel):
+    id: int
+    platform: str
+    external_campaign_id: str
+    name: str
+    status: Optional[str] = None
+    ad_account_id: int
+    account_name: Optional[str] = None
 
 
 # â”€â”€â”€ Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -143,6 +154,51 @@ async def list_ad_accounts(
     result = await db.execute(query)
     ad_accounts = result.scalars().all()
     return ad_accounts
+
+
+@router.get(
+    "/ad-campaigns",
+    response_model=List[AdCampaignResponse],
+    summary="List synced ad campaigns for URL attribution",
+)
+async def list_ad_campaigns(
+    platform: Optional[str] = None,
+    client: CachedClient = Depends(get_current_client),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Lists synced campaigns for the authenticated client.
+    Used by the campaign URL builder to include exact bk_campaign_id attribution.
+    """
+    query = (
+        select(AdCampaign, AdAccount)
+        .join(AdAccount, AdCampaign.ad_account_id == AdAccount.id)
+        .where(AdAccount.client_id == client.id)
+        .order_by(AdCampaign.updated_at.desc(), AdCampaign.name.asc())
+    )
+    if platform:
+        platform_clean = platform.strip().lower()
+        if platform_clean not in ("meta", "tiktok"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Platform must be 'meta' or 'tiktok'",
+            )
+        query = query.where(AdCampaign.platform == platform_clean)
+
+    result = await db.execute(query)
+    rows = result.all()
+    return [
+        AdCampaignResponse(
+            id=campaign.id,
+            platform=campaign.platform,
+            external_campaign_id=campaign.external_campaign_id,
+            name=campaign.name,
+            status=campaign.status,
+            ad_account_id=account.id,
+            account_name=account.account_name,
+        )
+        for campaign, account in rows
+    ]
 
 
 @router.delete(

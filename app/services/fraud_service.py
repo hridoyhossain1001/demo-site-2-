@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple
@@ -11,6 +12,8 @@ from app.schemas.event import EventData, UserData, _clean_and_hash
 from app.services.geoip_service import get_location_data
 
 logger = logging.getLogger(__name__)
+
+FRAUD_AUTO_HOLD_THRESHOLD = int(os.getenv("FRAUD_AUTO_HOLD_THRESHOLD", "90"))
 
 DISPOSABLE_DOMAINS = {
     "tempmail.com", "temp-mail.org", "10minutemail.com", "yopmail.com",
@@ -50,6 +53,13 @@ def is_gibberish(name: str) -> bool:
         if not any(char in vowels for char in name_clean.lower()):
             return True
     return False
+
+
+def should_auto_hold_for_fraud(score: int | None) -> bool:
+    """Return True when product policy requires manual review before sending Purchase."""
+    if not FRAUD_AUTO_HOLD_THRESHOLD or FRAUD_AUTO_HOLD_THRESHOLD < 1:
+        return False
+    return (score or 0) >= FRAUD_AUTO_HOLD_THRESHOLD
 
 
 def check_ip_location_mismatch(client_ip: str, user_data: UserData) -> bool:

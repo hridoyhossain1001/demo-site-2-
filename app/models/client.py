@@ -40,6 +40,8 @@ class Client(Base):
     # ─── Webhook (Outbound) ────────────────────────────────────────────
     webhook_url = Column(String, nullable=True)                    # Custom Webhook URL (outbound)
     shopify_shared_secret = Column(String, nullable=True)          # Shopify Webhook Shared Secret
+    woocommerce_webhook_secret = Column(String, nullable=True)     # WooCommerce Webhook Shared Secret
+    capi_signing_secret = Column(String, nullable=True)            # CAPI domain-proof HMAC secret (encrypted)
 
     # ─── Monthly Usage Limit (Rate Limiting Per-Client) ───────────────
     monthly_limit = Column(Integer, default=50000, nullable=False)  # মাসিক সর্বোচ্চ ইভেন্ট (0 = unlimited)

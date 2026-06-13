@@ -23,9 +23,17 @@ from fastapi.responses import Response, JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.dependencies import get_current_client, CachedClient, _client_cache, _snapshot, CACHE_TTL, set_in_client_cache
+from app.dependencies import (
+    CACHE_TTL,
+    CachedClient,
+    _client_cache,
+    _client_cache_invalidated,
+    _snapshot,
+    get_current_client,
+    set_in_client_cache,
+)
 from app.models.client import Client
-from app.services.dedup_service import reserve_unique_event_ids
+from app.services.dedup_service import reserve_unique_event_ids, rollback_redis_dedup
 from app.services.fast_ingest_service import dedup_reserve_usage_and_enqueue_stream
 from app.schemas.event import EventData, UserData, CustomData
 from app.services.bot_detector import classify_traffic
@@ -163,9 +171,12 @@ async def _get_client_by_key(public_key: str, db: AsyncSession) -> CachedClient:
     if cache_key in _client_cache:
         cached, cached_at = _client_cache[cache_key]
         if now - cached_at < CACHE_TTL:
-            if cached.is_active:
+            if await _client_cache_invalidated(cached.api_key, cached_at):
+                del _client_cache[cache_key]
+            elif cached.is_active:
                 return cached
-            raise HTTPException(status_code=401, detail="Inactive API Key।")
+            else:
+                raise HTTPException(status_code=401, detail="Inactive API Key.")
 
     # ─── ৩. DB Lookup ──────────────────────────────────────────────────────
     result = await db.execute(
@@ -373,6 +384,7 @@ async def collect_event(
 
     # ─── Dedup + Usage Reserve + Outbox Enqueue ──────────────────────
     unique_events = []
+    reserved_ids: set[str] = set()
     try:
         candidate_ids = []
         seen_ids: set[str] = set()
@@ -440,9 +452,11 @@ async def collect_event(
             response_data = {"status": "ok", "events_received": len(unique_events), "message": "queued"}
             resp = JSONResponse(content=response_data)
     except HTTPException:
+        await rollback_redis_dedup(client.id, reserved_ids)
         await db.rollback()
         raise
     except Exception as e:
+        await rollback_redis_dedup(client.id, reserved_ids)
         await db.rollback()
         logger.exception(f"[{client.name}] Tracker enqueue failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to queue tracker event") from None

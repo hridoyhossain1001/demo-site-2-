@@ -1,5 +1,6 @@
 import os
 import logging
+import hashlib
 import httpx
 import ipaddress
 import maxminddb
@@ -18,6 +19,7 @@ MAXMIND_ACCOUNT_ID = os.getenv("MAXMIND_ACCOUNT_ID", "")
 MAXMIND_LICENSE_KEY = os.getenv("MAXMIND_LICENSE_KEY", "")
 GEOIP_MAX_AGE_DAYS = int(os.getenv("GEOIP_MAX_AGE_DAYS", "7"))
 ALLOW_GEOIP_FALLBACK_MIRROR = os.getenv("ALLOW_GEOIP_FALLBACK_MIRROR", "false").lower() in {"1", "true", "yes"}
+GEOIP_FALLBACK_SHA256 = os.getenv("GEOIP_FALLBACK_SHA256", "").strip().lower()
 
 _reader = None
 
@@ -95,13 +97,20 @@ async def _download_official_maxmind_db(tmp_path: str):
 
 
 async def _download_fallback_geoip_db(tmp_path: str):
+    if len(GEOIP_FALLBACK_SHA256) != 64 or any(char not in "0123456789abcdef" for char in GEOIP_FALLBACK_SHA256):
+        raise RuntimeError("GEOIP_FALLBACK_SHA256 must be a pinned 64-character SHA-256 digest.")
+
     timeout = httpx.Timeout(180.0, connect=20.0)
+    digest = hashlib.sha256()
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         async with client.stream("GET", DB_URL) as response:
             response.raise_for_status()
             with open(tmp_path, "wb") as f:
                 async for chunk in response.aiter_bytes():
                     f.write(chunk)
+                    digest.update(chunk)
+    if digest.hexdigest() != GEOIP_FALLBACK_SHA256:
+        raise RuntimeError("Fallback GeoIP database SHA-256 did not match GEOIP_FALLBACK_SHA256.")
 
 
 async def download_geoip_db_if_missing():

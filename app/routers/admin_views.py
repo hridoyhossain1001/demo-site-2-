@@ -405,8 +405,8 @@ async def rotate_client_key(
     await log_admin_action(db, request, username, action, client_id)
     await db.commit()
 
-    from app.dependencies import clear_client_cache
-    clear_client_cache(old_api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(old_api_key)
 
     return admin_redirect(message)
 
@@ -459,8 +459,8 @@ async def deactivate_client(
     await db.commit()
 
     if api_key:
-        from app.dependencies import clear_client_cache
-        clear_client_cache(api_key)
+        from app.dependencies import invalidate_client_cache
+        await invalidate_client_cache(api_key)
 
     return admin_redirect("ক্লায়েন্ট Deactivate করা হয়েছে")
 
@@ -480,8 +480,8 @@ async def activate_client(
     await db.commit()
 
     if api_key:
-        from app.dependencies import clear_client_cache
-        clear_client_cache(api_key)
+        from app.dependencies import invalidate_client_cache
+        await invalidate_client_cache(api_key)
 
     return admin_redirect("ক্লায়েন্ট Activate করা হয়েছে")
 
@@ -531,8 +531,8 @@ async def delete_client(
     await db.commit()
 
     if api_key:
-        from app.dependencies import clear_client_cache
-        clear_client_cache(api_key)
+        from app.dependencies import invalidate_client_cache
+        await invalidate_client_cache(api_key)
 
     return admin_redirect(f"Client deleted: {client_name}")
 
@@ -716,8 +716,8 @@ async def edit_client_submit(
     await log_admin_action(db, request, username, "client.updated", client_id, f"Client {name} updated")
     await db.commit()
 
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     q = urlencode({"msg": f"✅ {name} সফলভাবে আপডেট হয়েছে!", "msg_type": "success"})
     return RedirectResponse(url=f"/api/v1/admin/clients?{q}", status_code=303)
@@ -746,8 +746,8 @@ async def update_monthly_limit(
     result = await db.execute(select(Client.api_key).where(Client.id == client_id))
     api_key = result.scalar()
     if api_key:
-        from app.dependencies import clear_client_cache
-        clear_client_cache(api_key)
+        from app.dependencies import invalidate_client_cache
+        await invalidate_client_cache(api_key)
 
     query = urlencode({"msg": f"Monthly limit updated to {monthly_limit:,} events", "msg_type": "success"})
     return RedirectResponse(url=f"/api/v1/admin/clients?{query}", status_code=303)
@@ -804,8 +804,8 @@ async def update_client_plan(
     await log_admin_action(db, request, username, audit_action, client.id, msg)
     await db.commit()
 
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     return admin_clients_redirect(msg)
 

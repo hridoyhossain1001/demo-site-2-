@@ -345,29 +345,23 @@ class CourierService:
 
         Returns: (city_id, zone_id, area_id)
         """
-        DHAKA_FALLBACK = (1, 1, 1)
-
         district = cls._extract_district_from_address(recipient_address)
         if not district:
-            logger.warning(
-                f"Could not extract district from address: '{recipient_address[:80]}'. "
-                "Falling back to Dhaka."
+            raise CourierServiceException(
+                "Pathao location could not be resolved from recipient address. "
+                "Provide explicit city, zone, and area IDs."
             )
-            return DHAKA_FALLBACK
 
         # ── Step 1: City match ────────────────────────────────────────────────
         cities = await cls._get_pathao_cities(token, base_url=base_url)
         if not cities:
-            logger.warning("Pathao city list empty — falling back to Dhaka")
-            return DHAKA_FALLBACK
+            raise CourierServiceException("Pathao city list is empty; cannot resolve location.")
 
         matched_city = cls._fuzzy_match(district, cities, "city_name")
         if not matched_city:
-            logger.warning(
-                f"Pathao: district '{district}' not found in city list — "
-                f"falling back to Dhaka. Address: '{recipient_address[:80]}'"
+            raise CourierServiceException(
+                f"Pathao district '{district}' was not found in the city list."
             )
-            return DHAKA_FALLBACK
 
         city_id = int(matched_city["city_id"])
         logger.info(
@@ -378,18 +372,28 @@ class CourierService:
         # ── Step 2: Zone — city-র প্রথম zone নাও ────────────────────────────
         zones = await cls._get_pathao_zones(token, city_id, base_url=base_url)
         if not zones:
-            logger.warning(f"No zones for Pathao city_id={city_id} — using zone_id=1")
-            return (city_id, 1, 1)
+            raise CourierServiceException(f"No Pathao zones found for city_id={city_id}.")
 
-        zone_id = int(zones[0]["zone_id"])
+        matched_zone = cls._fuzzy_match(recipient_address, zones, "zone_name")
+        if not matched_zone:
+            raise CourierServiceException(
+                f"Pathao zone could not be resolved from recipient address for city_id={city_id}."
+            )
+
+        zone_id = int(matched_zone["zone_id"])
 
         # ── Step 3: Area — zone-র প্রথম area নাও ────────────────────────────
         areas = await cls._get_pathao_areas(token, zone_id, base_url=base_url)
         if not areas:
-            logger.warning(f"No areas for Pathao zone_id={zone_id} — using area_id=1")
-            return (city_id, zone_id, 1)
+            raise CourierServiceException(f"No Pathao areas found for zone_id={zone_id}.")
 
-        area_id = int(areas[0]["area_id"])
+        matched_area = cls._fuzzy_match(recipient_address, areas, "area_name")
+        if not matched_area:
+            raise CourierServiceException(
+                f"Pathao area could not be resolved from recipient address for zone_id={zone_id}."
+            )
+
+        area_id = int(matched_area["area_id"])
 
         logger.info(
             f"Pathao IDs resolved → city_id={city_id}, zone_id={zone_id}, area_id={area_id}"
@@ -499,18 +503,18 @@ class CourierService:
         }
 
         explicit_location_ids = all((recipient_city, recipient_zone, recipient_area))
-        if explicit_location_ids or cls.pathao_is_sandbox(base_url):
-            if explicit_location_ids:
-                city_id, zone_id, area_id = recipient_city, recipient_zone, recipient_area
-            else:
-                city_id, zone_id, area_id = await cls.resolve_pathao_location(
-                    token, recipient_address, base_url=base_url
-                )
+        if explicit_location_ids:
+            city_id, zone_id, area_id = recipient_city, recipient_zone, recipient_area
             payload.update(
                 recipient_city=city_id,
                 recipient_zone=zone_id,
                 recipient_area=area_id,
             )
+        elif cls.pathao_is_sandbox(base_url):
+            return {
+                "success": False,
+                "error": "Pathao sandbox booking requires explicit recipient_city, recipient_zone, and recipient_area IDs.",
+            }
 
         logger.info(
             "Pathao order payload: order=%s environment=%s explicit_location_ids=%s",
@@ -818,9 +822,11 @@ class CourierService:
         token = await cls.get_pathao_token(client_id, client_secret, email, password, base_url=base_url)
         if not token:
             return {
-                "success": True,
-                "local_only": True,
-                "message": "Pathao authentication failed. Order marked cancelled locally. Please cancel manually from Pathao merchant panel.",
+                "success": False,
+                "local_only": False,
+                "provider_active": True,
+                "error": "Pathao authentication failed. Order was not cancelled on Pathao.",
+                "message": "Pathao authentication failed. Please cancel manually from Pathao merchant panel.",
             }
 
         url = f"{base_url}/aladdin/api/v1/orders/cancel"
@@ -875,8 +881,10 @@ class CourierService:
                     )
                     reason = body_message or f"Pathao error (code={body_code_int})"
                     return {
-                        "success": True,
-                        "local_only": True,
+                        "success": False,
+                        "local_only": False,
+                        "provider_active": True,
+                        "error": reason,
                         "message": (
                             f"Pathao-তে cancel করা সম্ভব হয়নি: {reason} "
                             "(শুধু এই system-এ cancelled হয়েছে। "
@@ -900,8 +908,10 @@ class CourierService:
                 err_msg = body_message or err_text
                 # HTTP error — local_only দিই, DB-তে cancelled করব কিন্তু user-কে জানাব
                 return {
-                    "success": True,
-                    "local_only": True,
+                    "success": False,
+                    "local_only": False,
+                    "provider_active": True,
+                    "error": err_msg,
                     "message": (
                         f"Pathao API error ({response.status_code}): {err_msg}. "
                         "(শুধু এই system-এ cancelled হয়েছে। "
@@ -911,8 +921,10 @@ class CourierService:
         except Exception as e:
             logger.error(f"Exception during Pathao cancel for {consignment_id}: {e}")
             return {
-                "success": True,
-                "local_only": True,
+                "success": False,
+                "local_only": False,
+                "provider_active": True,
+                "error": str(e),
                 "message": (
                     f"Network error: {e}. "
                     "(শুধু এই system-এ cancelled হয়েছে। "

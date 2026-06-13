@@ -10,7 +10,8 @@ from app.services.fraud_service import (
     is_gibberish,
     check_ip_location_mismatch,
     check_velocity,
-    calculate_fraud_score
+    calculate_fraud_score,
+    should_auto_hold_for_fraud,
 )
 
 
@@ -66,6 +67,28 @@ def test_gibberish_name_detection():
     assert is_gibberish("1234567") is True
     assert is_gibberish("aaaaaa") is True
     assert is_gibberish("bcdfgh") is True  # Consonants only
+
+
+def test_fraud_auto_hold_policy(monkeypatch):
+    from app.services import fraud_service
+
+    monkeypatch.setattr(fraud_service, "FRAUD_AUTO_HOLD_THRESHOLD", 90)
+
+    assert should_auto_hold_for_fraud(89) is False
+    assert should_auto_hold_for_fraud(90) is True
+    assert should_auto_hold_for_fraud(100) is True
+
+    monkeypatch.setattr(fraud_service, "FRAUD_AUTO_HOLD_THRESHOLD", 0)
+    assert should_auto_hold_for_fraud(100) is False
+
+
+def test_events_route_auto_holds_high_risk_purchase():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "routers" / "events.py").read_text(encoding="utf-8")
+
+    assert "should_auto_hold_for_fraud(fraud_result[0])" in source
+    assert 'fraud_portal_state = "fraud_review"' in source
 
 
 @patch("app.services.fraud_service.get_location_data")

@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, Request, Response, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, update, desc, cast, Numeric, String
+from sqlalchemy import select, func, and_, or_, update, desc, String
 
 from app.database import get_db
 from app.models.client import Client
@@ -18,7 +18,7 @@ from app.models.plugin_connect_session import PluginConnectSession
 from app.models.usage_counter import UsageCounter
 from app.routers.client_portal import get_client_from_portal_session
 from app.security import encrypt_token, decrypt_token, meta_credentials_configured
-from app.routers.deferred_events import _queue_confirmed_event
+from app.routers.deferred_events import _pending_event_value, _queue_confirmed_event, _safe_numeric_value
 import calendar
 from app.models.client_user import ClientUser
 from app.routers.client_auth import (
@@ -41,6 +41,7 @@ from app.services.plan_service import (
     require_trial_available,
 )
 from app.services.site_binding_service import require_site_binding_available
+from app.services.client_secrets import ensure_capi_signing_secret
 from app.utils.plugin_connect import (
     append_query,
     is_site_allowed_for_client,
@@ -62,8 +63,8 @@ async def get_current_portal_client(request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=401, detail="Unauthorized session. Please login.")
     if apply_expired_trial_downgrade(client):
         await db.commit()
-        from app.dependencies import clear_client_cache
-        clear_client_cache(client.api_key)
+        from app.dependencies import invalidate_client_cache
+        await invalidate_client_cache(client.api_key)
     return client
 
 # â”€â”€â”€ Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -163,6 +164,78 @@ ACTIVE_COURIER_STATUSES = [
     "shipped",
 ]
 INCOMPLETE_CHECKOUT_STATUSES = {"active", "incomplete", "contacted", "recovered", "ignored", "expired"}
+PRODUCT_ATTRIBUTE_KEYS = ("color", "colour", "size", "number", "style", "material", "pattern")
+
+
+def _normalize_order_product_attributes(item: dict) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+
+    def add(key, value) -> None:
+        label = str(key or "").replace("attribute_", "").replace("pa_", "").replace("_", " ").strip()
+        text = str(value or "").strip()
+        if label and text and text.lower() not in {"none", "null", "n/a"}:
+            attributes[label[:80].title()] = text[:160]
+
+    raw_attributes = item.get("attributes")
+    if isinstance(raw_attributes, dict):
+        for key, value in raw_attributes.items():
+            add(key, value)
+    elif isinstance(raw_attributes, list):
+        for entry in raw_attributes:
+            if isinstance(entry, dict):
+                add(entry.get("name") or entry.get("key"), entry.get("option") or entry.get("value"))
+
+    variation = item.get("variation")
+    if isinstance(variation, dict):
+        for key, value in variation.items():
+            add(key, value)
+
+    for meta_key in ("meta_data", "item_meta"):
+        metadata = item.get(meta_key)
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                add(key, value)
+        elif isinstance(metadata, list):
+            for entry in metadata:
+                if isinstance(entry, dict):
+                    add(entry.get("display_key") or entry.get("name") or entry.get("key"), entry.get("display_value") or entry.get("value"))
+
+    for key in PRODUCT_ATTRIBUTE_KEYS:
+        if item.get(key) is not None:
+            add(key, item.get(key))
+
+    return attributes
+
+
+def _order_price_breakdown(products: list[dict], custom_data: dict, raw_order_data: dict) -> dict[str, float]:
+    product_subtotal = round(sum(
+        _safe_numeric_value(product.get("price")) * int(product.get("quantity") or 1)
+        for product in products
+    ), 2)
+    order_total = round(
+        _safe_numeric_value(custom_data.get("value"))
+        or _safe_numeric_value(raw_order_data.get("cod_amount"))
+        or product_subtotal,
+        2,
+    )
+    delivery_charge = round(
+        _safe_numeric_value(raw_order_data.get("delivery_charge"))
+        or _safe_numeric_value(raw_order_data.get("shipping_total")),
+        2,
+    )
+    discount = round(
+        _safe_numeric_value(raw_order_data.get("discount"))
+        or _safe_numeric_value(raw_order_data.get("discount_total")),
+        2,
+    )
+    other_adjustment = round(order_total - product_subtotal - delivery_charge + discount, 2)
+    return {
+        "productSubtotal": product_subtotal,
+        "deliveryCharge": delivery_charge,
+        "discount": discount,
+        "otherAdjustment": other_adjustment,
+        "orderTotal": order_total,
+    }
 
 
 def _parse_seen_at(value: str | None) -> datetime:
@@ -220,11 +293,16 @@ async def _refresh_incomplete_checkout_states(db: AsyncSession, client_id: int) 
             or ""
         ).strip()
         if phone:
+            pending_created = pending.created_at
+            if pending_created and pending_created.tzinfo is None:
+                pending_created = pending_created.replace(tzinfo=timezone.utc)
             await recover_open_checkouts_for_order(
                 db,
                 client_id=client_id,
                 phone=phone,
                 order_id=str(pending.order_id),
+                activity_window_start=(pending_created - timedelta(hours=12)) if pending_created else None,
+                activity_window_end=(pending_created + timedelta(minutes=5)) if pending_created else None,
             )
 
     stale_result = await db.execute(
@@ -292,7 +370,6 @@ async def list_incomplete_checkouts(
     db: AsyncSession = Depends(get_db),
 ):
     require_growth_access(client, "Incomplete checkout recovery")
-    await _refresh_incomplete_checkout_states(db, client.id)
     stmt = select(IncompleteCheckout).where(IncompleteCheckout.client_id == client.id)
     if status:
         if status not in INCOMPLETE_CHECKOUT_STATUSES:
@@ -309,6 +386,16 @@ async def list_incomplete_checkouts(
     )
     counts = {str(row_status): int(count or 0) for row_status, count in counts_result.all()}
     return {"items": items, "counts": counts}
+
+
+@router.post("/incomplete-checkouts/refresh")
+async def refresh_incomplete_checkouts(
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db),
+):
+    require_growth_access(client, "Incomplete checkout recovery")
+    await _refresh_incomplete_checkout_states(db, client.id)
+    return {"success": True}
 
 
 @router.post("/incomplete-checkouts/{checkout_id}/status")
@@ -749,14 +836,21 @@ async def reset_demo(client: Client = Depends(get_current_portal_client)):
 
 # â”€â”€â”€ WordPress Connection Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.get("/connection")
-async def get_connection(client: Client = Depends(get_current_portal_client)):
-    return {
+async def get_connection(
+    client: Client = Depends(get_current_portal_client),
+    db: AsyncSession = Depends(get_db),
+):
+    capi_signing_secret = ensure_capi_signing_secret(client)
+    response = {
         "wpVersion": "6.4.3",
         "lastHeartbeat": client.updated_at.isoformat() if client.updated_at else datetime.now(timezone.utc).isoformat(),
         "status": "Active" if client.is_active else "Disconnected",
         "token": client.public_key or "",
-        "api_key": client.api_key
+        "api_key": client.api_key,
+        "capi_signing_secret": capi_signing_secret,
     }
+    await db.commit()
+    return response
 
 @router.post("/connection/test")
 async def test_wp_connection(
@@ -764,8 +858,8 @@ async def test_wp_connection(
     db: AsyncSession = Depends(get_db)
 ):
     client.updated_at = datetime.now(timezone.utc)
-    await db.commit()
-    return {
+    capi_signing_secret = ensure_capi_signing_secret(client)
+    response = {
         "success": True,
         "message": "WP Heartbeat registered successfully. Connection parameters are clean.",
         "connection": {
@@ -773,9 +867,12 @@ async def test_wp_connection(
             "lastHeartbeat": client.updated_at.isoformat(),
             "status": "Active",
             "token": client.public_key or client.api_key,
-            "api_key": client.api_key
+            "api_key": client.api_key,
+            "capi_signing_secret": capi_signing_secret,
         }
     }
+    await db.commit()
+    return response
 
 @router.post("/connection/revoke")
 async def revoke_wp_token(
@@ -785,20 +882,25 @@ async def revoke_wp_token(
     old_api_key = client.api_key
     client.api_key = secrets.token_urlsafe(32)
     client.public_key = secrets.token_urlsafe(24)
-    await db.commit()
-    from app.dependencies import clear_client_cache
-    clear_client_cache(old_api_key)
-    clear_client_cache(client.api_key)
-    return {
+    client.capi_signing_secret = None
+    capi_signing_secret = ensure_capi_signing_secret(client)
+    new_api_key = client.api_key
+    response = {
         "success": True,
         "connection": {
             "wpVersion": "6.4.3",
             "lastHeartbeat": datetime.now(timezone.utc).isoformat(),
             "status": "Disconnected",
             "token": client.public_key,
-            "api_key": client.api_key
+            "api_key": new_api_key,
+            "capi_signing_secret": capi_signing_secret,
         }
     }
+    await db.commit()
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(old_api_key)
+    await invalidate_client_cache(new_api_key)
+    return response
 
 # â”€â”€â”€ Platform Credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/plugin-connect/authorize")
@@ -939,8 +1041,8 @@ async def update_credentials(
         await record_trial_identity(db, client, source="credentials")
 
     await db.commit()
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     meta_configured = meta_credentials_configured(client)
     meta_status = "Valid" if meta_configured else "Untested"
@@ -998,8 +1100,8 @@ async def update_rules(
     await db.commit()
 
     # Clear client cache
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     return {"success": True, "rules": client.event_rules}
 
@@ -1710,18 +1812,34 @@ async def get_deferred_purchases(
     )
     confirmed_today = confirmed_today_r.scalar() or 0
 
-    sum_and_min_stmt = select(
-        func.sum(cast(PendingEvent.event_data['custom_data'].op('->>')('value'), Numeric)),
-        func.min(PendingEvent.created_at)
-    ).where(
-        and_(
-            PendingEvent.client_id == client.id,
-            PendingEvent.status == "pending"
-        )
+    pending_base_filter = and_(
+        PendingEvent.client_id == client.id,
+        PendingEvent.status == "pending",
     )
-    sum_and_min_res = await db.execute(sum_and_min_stmt)
-    sum_val, oldest_created = sum_and_min_res.fetchone()
-    pending_value = float(sum_val or 0.0)
+    deferred_pending_filter = and_(
+        PendingEvent.client_id == client.id,
+        PendingEvent.status == "pending",
+        or_(
+            PendingEvent.portal_state.is_(None),
+            PendingEvent.portal_state != "operations_only",
+        ),
+    )
+
+    pending_summary_res = await db.execute(
+        select(PendingEvent.event_data, PendingEvent.created_at, PendingEvent.portal_state)
+        .where(pending_base_filter)
+    )
+    pending_summary_rows = pending_summary_res.all()
+    pending_value = sum(_pending_event_value(event_data) for event_data, _created_at, _portal_state in pending_summary_rows)
+    oldest_created = min((created_at for _event_data, created_at, _portal_state in pending_summary_rows if created_at), default=None)
+    deferred_summary_rows = [
+        (event_data, created_at, portal_state)
+        for event_data, created_at, portal_state in pending_summary_rows
+        if portal_state != "operations_only"
+    ]
+    deferred_total_count = len(deferred_summary_rows)
+    deferred_pending_value = sum(_pending_event_value(event_data) for event_data, _created_at, _portal_state in deferred_summary_rows)
+    deferred_oldest_created = min((created_at for _event_data, created_at, _portal_state in deferred_summary_rows if created_at), default=None)
 
     now_utc = datetime.now(timezone.utc)
     if oldest_created:
@@ -1774,9 +1892,9 @@ async def get_deferred_purchases(
                     products.append({
                         "name": display_name,
                         "category": item.get("content_category") or item.get("category") or "",
-                        "attributes": item.get("attributes") or {},
+                        "attributes": _normalize_order_product_attributes(item),
                         "quantity": int(item.get("quantity") or item.get("qty") or 1),
-                        "price": float(item.get("item_price") or item.get("price") or 0),
+                        "price": _safe_numeric_value(item.get("item_price") or item.get("price")),
                     })
         # Fallback: check raw_order_data for line_items (WooCommerce order data)
         if not products and raw_order_data:
@@ -1787,26 +1905,32 @@ async def get_deferred_purchases(
                         raw_name = item.get("name") or item.get("title") or item.get("product_name") or ""
                         item_id = str(item.get("product_id") or item.get("id") or "")
                         display_name = raw_name if raw_name else f"Product #{item_id}" if item_id else "Unknown Product"
+                        quantity = int(item.get("quantity") or 1)
+                        unit_price = _safe_numeric_value(item.get("price"))
+                        if not unit_price and item.get("subtotal") is not None:
+                            unit_price = _safe_numeric_value(item.get("subtotal")) / max(quantity, 1)
                         products.append({
                             "name": display_name,
                             "category": item.get("content_category") or item.get("category") or "",
-                            "attributes": item.get("attributes") or {},
-                            "quantity": int(item.get("quantity") or 1),
-                            "price": float(item.get("subtotal") or item.get("price") or 0),
+                            "attributes": _normalize_order_product_attributes(item),
+                            "quantity": quantity,
+                            "price": unit_price,
                         })
         # Last fallback: num_items generic entry
         if not products and custom_data.get("num_items"):
             products.append({
                 "name": "Product (details not available)",
                 "quantity": int(custom_data.get("num_items", 1)),
-                "price": float(custom_data.get("value", 0)),
+                "price": _safe_numeric_value(custom_data.get("value")),
             })
 
+        price_breakdown = _order_price_breakdown(products, custom_data, raw_order_data)
         pending_list.append({
             "id": pe.id,
             "orderId": pe.order_id,
             "operationsOnly": pe.portal_state == "operations_only",
-            "amount": custom_data.get("value", 0),
+            "amount": price_breakdown["orderTotal"],
+            **price_breakdown,
             "customer": customer_str,
             # Real recipient info (unmasked) from raw courier payload. Include both
             # recipient* and customer* aliases because portal views use both shapes.
@@ -1825,11 +1949,15 @@ async def get_deferred_purchases(
         })
 
     deferred_pending_list = [item for item in pending_list if not item["operationsOnly"]]
-    deferred_pending_value = sum(float(item["amount"] or 0) for item in deferred_pending_list)
-    deferred_oldest_age_hours = max(
-        (float(item["ageHours"]) for item in deferred_pending_list),
-        default=0.0,
-    )
+    if deferred_oldest_created:
+        deferred_created = (
+            deferred_oldest_created.replace(tzinfo=timezone.utc)
+            if deferred_oldest_created.tzinfo is None
+            else deferred_oldest_created
+        )
+        deferred_oldest_age_hours = round((now_utc - deferred_created).total_seconds() / 3600, 1)
+    else:
+        deferred_oldest_age_hours = 0.0
 
     pending_value_display = f"৳{deferred_pending_value:,.0f}" if deferred_pending_value else "৳0"
     operations_value_display = f"৳{pending_value:,.0f}" if pending_value else "৳0"
@@ -1840,7 +1968,7 @@ async def get_deferred_purchases(
         "deferredEnabled": bool(client.deferred_purchase),
         "autoConfirmDays": min(max(0, getattr(client, "auto_confirm_days", 0)), 7),
         "autoConfirmStatus": str(getattr(client, "auto_confirm_status", "completed")),
-        "pendingCount": len(deferred_pending_list),
+        "pendingCount": deferred_total_count,
         "pendingValue": pending_value_display,
         "confirmedTotal": confirmed_total,
         "cancelledTotal": cancelled_total,
@@ -1852,7 +1980,7 @@ async def get_deferred_purchases(
         "operationsPendingValue": operations_value_display,
         "operationsOldestPending": operations_oldest_display,
         "operationsPendingList": pending_list,
-        "deferredPendingCount": len(deferred_pending_list),
+        "deferredPendingCount": deferred_total_count,
         "deferredPendingValue": pending_value_display,
         "deferredOldestPending": deferred_oldest_display,
         "deferredPendingList": deferred_pending_list,
@@ -1875,8 +2003,8 @@ async def save_deferred_settings(
     await db.commit()
 
     # Clear client cache
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     return {
         "success": True,
@@ -2047,8 +2175,8 @@ async def update_current_store_domain(
     ))
     await db.commit()
 
-    from app.dependencies import clear_client_cache
-    clear_client_cache(current_client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(current_client.api_key)
 
     return {
         "success": True,
@@ -2145,6 +2273,7 @@ async def create_store(
     )
     db.add(new_client)
     await db.flush()
+    ensure_capi_signing_secret(new_client)
 
     # Create a ClientUser for the same email in the new store
     new_user = ClientUser(
@@ -2226,8 +2355,8 @@ async def update_notification_settings(
     await db.commit()
 
     # Clear client cache
-    from app.dependencies import clear_client_cache
-    clear_client_cache(client.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(client.api_key)
 
     return {
         "success": True,

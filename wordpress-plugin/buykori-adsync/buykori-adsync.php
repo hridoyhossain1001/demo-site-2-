@@ -56,6 +56,7 @@ function buykorigw_activate()
     if (!get_option(BUYKORIGW_OPTION_KEY)) {
         $defaults = array(
             'api_key' => '',
+            'capi_signing_secret' => '',
             'gateway_url' => BUYKORIGW_DEFAULT_GATEWAY_URL,
             // Core Events
             'enable_pageview' => 1,
@@ -251,6 +252,7 @@ function buykorigw_get_settings()
     $settings = get_option(BUYKORIGW_OPTION_KEY, array());
     return wp_parse_args($settings, array(
         'api_key' => '',
+        'capi_signing_secret' => '',
         'gateway_url' => BUYKORIGW_DEFAULT_GATEWAY_URL,
         // Core Events
         'enable_pageview' => 1,
@@ -346,10 +348,14 @@ function buykorigw_site_origin()
     return $scheme . '://' . strtolower($parts['host']);
 }
 
-function buykorigw_signed_headers($api_key, $body)
+function buykorigw_signed_headers($api_key, $body, $signing_secret = '')
 {
     $timestamp = (string) time();
-    $signature = hash_hmac('sha256', $timestamp . '.' . $body, $api_key);
+    $secret = trim((string) $signing_secret);
+    if ($secret === '') {
+        $secret = (string) $api_key;
+    }
+    $signature = hash_hmac('sha256', $timestamp . '.' . $body, $secret);
 
     return array(
         'X-CAPI-Origin' => buykorigw_site_origin(),
@@ -576,12 +582,12 @@ function buykorigw_parse_amount($value)
     return max(0, (float) $value);
 }
 
-function buykorigw_set_last_event_error($message = '', $code = 0, $body = '')
+function buykorigw_set_last_event_error($message = '', $code = 0, $terminal = false)
 {
     $GLOBALS['buykorigw_last_event_error'] = array(
-        'message' => sanitize_text_field((string) $message),
-        'code'    => (int) $code,
-        'body'    => substr(wp_strip_all_tags((string) $body), 0, 500),
+        'message'  => sanitize_text_field((string) $message),
+        'code'     => (int) $code,
+        'terminal' => (bool) $terminal,
     );
 }
 
@@ -601,6 +607,7 @@ function buykorigw_retryable_event_name($event_name)
         'RemoveFromCart',
         'InitiateCheckout',
         'AddPaymentInfo',
+        'Purchase',
         'Lead',
         'Search',
     ), true);
@@ -613,7 +620,7 @@ function buykorigw_retry_event_key($event_data)
     return 'buykorigw_retry_event_' . md5($event_name . '|' . $event_id . '|' . wp_json_encode($event_data));
 }
 
-function buykorigw_schedule_event_retry($event_data, $attempt = 1)
+function buykorigw_schedule_event_retry($event_data, $attempt = 1, $hold = false)
 {
     $event_name = (string) ($event_data['event_name'] ?? '');
     if (!buykorigw_retryable_event_name($event_name)) {
@@ -630,6 +637,7 @@ function buykorigw_schedule_event_retry($event_data, $attempt = 1)
         'event_data' => $event_data,
         'attempt'    => $attempt,
         'created_at' => time(),
+        'hold'       => (bool) $hold,
     ), false);
 
     $delay = 300 * $attempt;
@@ -671,9 +679,16 @@ function buykorigw_retry_event_handler($args)
     }
 
     $attempt = max(1, (int) ($item['attempt'] ?? 1));
-    $sent = buykorigw_send_event($item['event_data'], true, false);
+    $sent = buykorigw_send_event($item['event_data'], true, false, !empty($item['hold']));
     if ($sent) {
         delete_option($retry_key);
+        return;
+    }
+
+    $last_error = buykorigw_get_last_event_error();
+    if (!empty($last_error['terminal'])) {
+        delete_option($retry_key);
+        error_log('[Buykori AdSync] Event retry stopped after terminal gateway response: ' . sanitize_text_field((string) ($item['event_data']['event_name'] ?? 'unknown')));
         return;
     }
 
@@ -683,10 +698,10 @@ function buykorigw_retry_event_handler($args)
         return;
     }
 
-    buykorigw_schedule_event_retry($item['event_data'], $attempt + 1);
+    buykorigw_schedule_event_retry($item['event_data'], $attempt + 1, !empty($item['hold']));
 }
 
-function buykorigw_send_event($event_data, $blocking = true, $schedule_retry = true)
+function buykorigw_send_event($event_data, $blocking = true, $schedule_retry = true, $hold = false)
 {
     $settings = buykorigw_get_settings();
     buykorigw_set_last_event_error();
@@ -697,19 +712,19 @@ function buykorigw_send_event($event_data, $blocking = true, $schedule_retry = t
             error_log('[Buykori AdSync] API Key or AdSync API URL is missing.');
         }
         if ($schedule_retry) {
-            buykorigw_schedule_event_retry($event_data, 1);
+            buykorigw_schedule_event_retry($event_data, 1, $hold);
         }
         return false;
     }
 
-    $url = rtrim($settings['gateway_url'], '/') . '/events';
+    $url = rtrim($settings['gateway_url'], '/') . '/events' . ($hold ? '?hold=true' : '');
 
     $body = wp_json_encode(array('data' => array($event_data)));
 
     $headers = array_merge(array(
         'Content-Type' => 'application/json',
         'X-API-Key' => $settings['api_key'],
-    ), buykorigw_signed_headers($settings['api_key'], $body));
+    ), buykorigw_signed_headers($settings['api_key'], $body, $settings['capi_signing_secret'] ?? ''));
 
     $response = wp_remote_post($url, array(
         'timeout' => 10,
@@ -727,7 +742,7 @@ function buykorigw_send_event($event_data, $blocking = true, $schedule_retry = t
             error_log('[Buykori AdSync] Send event failed: ' . $response->get_error_message());
         }
         if ($schedule_retry) {
-            buykorigw_schedule_event_retry($event_data, 1);
+            buykorigw_schedule_event_retry($event_data, 1, $hold);
         }
         return false;
     }
@@ -741,12 +756,24 @@ function buykorigw_send_event($event_data, $blocking = true, $schedule_retry = t
         return true;
     }
 
-    if ($settings['debug_mode']) {
-        error_log('[Buykori AdSync] Send event HTTP ' . $code . ': ' . wp_remote_retrieve_body($response));
+    if ($hold && $code === 403) {
+        buykorigw_set_last_event_error(
+            'Deferred Purchase is not enabled for this Buykori account. Disable it in the plugin or enable it in Buykori.',
+            $code,
+            true
+        );
+        if ($settings['debug_mode']) {
+            error_log('[Buykori AdSync] Deferred Purchase configuration mismatch (HTTP 403); retry skipped.');
+        }
+        return false;
     }
-    buykorigw_set_last_event_error('Gateway returned a non-success response.', $code, wp_remote_retrieve_body($response));
+
+    if ($settings['debug_mode']) {
+        error_log('[Buykori AdSync] Send event HTTP ' . $code . '.');
+    }
+    buykorigw_set_last_event_error('Gateway returned a non-success response.', $code);
     if ($schedule_retry) {
-        buykorigw_schedule_event_retry($event_data, 1);
+        buykorigw_schedule_event_retry($event_data, 1, $hold);
     }
     return false;
 }
@@ -811,15 +838,44 @@ function buykorigw_identity_cookie_name($field)
     return '_buykorigw_id_' . preg_replace('/[^a-z0-9_]/', '', (string) $field);
 }
 
+function buykorigw_identity_cookie_cache_enabled()
+{
+    return (bool) apply_filters('buykorigw_enable_identity_hash_cookies', false);
+}
+
+function buykorigw_clear_identity_cookie($field)
+{
+    $cookie_name = buykorigw_identity_cookie_name($field);
+    $cookie_opts = array(
+        'expires'  => time() - DAY_IN_SECONDS,
+        'path'     => '/',
+        'secure'   => is_ssl(),
+        'httponly' => false,
+        'samesite' => 'Lax',
+    );
+
+    if (!headers_sent()) {
+        setcookie($cookie_name, '', $cookie_opts);
+    }
+    unset($_COOKIE[$cookie_name]);
+}
+
 function buykorigw_cache_identity_hash($field, $hashed)
 {
     if (empty($hashed) || !preg_match('/^[a-f0-9]{64}$/', $hashed)) {
         return;
     }
 
+    if (!buykorigw_identity_cookie_cache_enabled()) {
+        buykorigw_clear_identity_cookie($field);
+        return;
+    }
+
     $cookie_name = buykorigw_identity_cookie_name($field);
+    $retention_days = (int) apply_filters('buykorigw_identity_hash_cookie_days', 7);
+    $retention_days = max(1, min(30, $retention_days));
     $cookie_opts = array(
-        'expires'  => time() + (180 * DAY_IN_SECONDS),
+        'expires'  => time() + ($retention_days * DAY_IN_SECONDS),
         'path'     => '/',
         'secure'   => is_ssl(),
         'httponly' => false,
@@ -832,6 +888,11 @@ function buykorigw_cache_identity_hash($field, $hashed)
 
 function buykorigw_get_cached_identity_hash($field)
 {
+    if (!buykorigw_identity_cookie_cache_enabled()) {
+        buykorigw_clear_identity_cookie($field);
+        return '';
+    }
+
     $cookie_name = buykorigw_identity_cookie_name($field);
     $hashed = isset($_COOKIE[$cookie_name]) ? sanitize_text_field(wp_unslash($_COOKIE[$cookie_name])) : '';
     return preg_match('/^[a-f0-9]{64}$/', $hashed) ? $hashed : '';
@@ -1367,6 +1428,50 @@ function buykorigw_normalize_event_custom_data($custom_data, $event_name, $setti
     return $custom_data;
 }
 
+function buykorigw_rest_browser_token_secret($settings = null)
+{
+    if ($settings === null) {
+        $settings = buykorigw_get_settings();
+    }
+    $api_key = isset($settings['api_key']) ? (string) $settings['api_key'] : '';
+    return wp_salt('nonce') . '|' . $api_key . '|' . home_url();
+}
+
+function buykorigw_create_rest_browser_token($settings = null)
+{
+    $expires = time() + (12 * HOUR_IN_SECONDS);
+    $nonce = wp_generate_password(20, false, false);
+    $payload = $expires . '|' . $nonce . '|' . home_url();
+    $signature = hash_hmac('sha256', $payload, buykorigw_rest_browser_token_secret($settings));
+    return $expires . '.' . $nonce . '.' . $signature;
+}
+
+function buykorigw_verify_rest_browser_token($token, $settings = null)
+{
+    $parts = explode('.', (string) $token, 3);
+    if (count($parts) !== 3) {
+        return false;
+    }
+    $expires = (int) $parts[0];
+    $nonce = sanitize_text_field($parts[1]);
+    $signature = sanitize_text_field($parts[2]);
+    if ($expires < time() || $expires > time() + DAY_IN_SECONDS || strlen($nonce) < 12) {
+        return false;
+    }
+    $payload = $expires . '|' . $nonce . '|' . home_url();
+    $expected = hash_hmac('sha256', $payload, buykorigw_rest_browser_token_secret($settings));
+    return hash_equals($expected, $signature);
+}
+
+function buykorigw_rest_browser_token_valid(WP_REST_Request $request)
+{
+    $token = $request->get_header('x-buykori-browser-token');
+    if (!$token) {
+        $token = $request->get_param('_buykori_browser_token') ?: $request->get_param('browser_token');
+    }
+    return buykorigw_verify_rest_browser_token($token);
+}
+
 add_action('rest_api_init', function () {
     register_rest_route('buykori/v1', '/track', array(
         'methods'             => 'POST',
@@ -1430,7 +1535,7 @@ function buykorigw_forward_incomplete_checkout($path, $payload, $blocking = true
         'headers'     => array_merge(array(
             'Content-Type' => 'application/json',
             'X-API-Key'    => $settings['api_key'],
-        ), buykorigw_signed_headers($settings['api_key'], $body)),
+        ), buykorigw_signed_headers($settings['api_key'], $body, $settings['capi_signing_secret'] ?? '')),
         'body'        => $body,
     ));
 
@@ -1448,7 +1553,7 @@ function buykorigw_forward_incomplete_checkout($path, $payload, $blocking = true
 
 function buykorigw_rest_browser_pixel_audit(WP_REST_Request $request)
 {
-    if (!buykorigw_rest_same_origin_allowed()) {
+    if (!buykorigw_rest_same_origin_allowed() || !buykorigw_rest_browser_token_valid($request)) {
         return new WP_REST_Response(array('success' => false, 'message' => 'Invalid origin'), 403);
     }
     if (function_exists('buykorigw_ajax_rate_limited') && buykorigw_ajax_rate_limited('BrowserPageView')) {
@@ -1485,7 +1590,7 @@ function buykorigw_rest_browser_pixel_audit(WP_REST_Request $request)
 
 function buykorigw_rest_capture_incomplete_checkout(WP_REST_Request $request)
 {
-    if (!buykorigw_rest_same_origin_allowed()) {
+    if (!buykorigw_rest_same_origin_allowed() || !buykorigw_rest_browser_token_valid($request)) {
         return new WP_REST_Response(array('success' => false, 'message' => 'Invalid origin'), 403);
     }
     if (function_exists('buykorigw_ajax_rate_limited') && buykorigw_ajax_rate_limited()) {
@@ -1593,9 +1698,9 @@ function buykorigw_rest_same_origin_allowed()
     return false;
 }
 
-function buykorigw_rest_get_atc_receipts()
+function buykorigw_rest_get_atc_receipts(WP_REST_Request $request)
 {
-    if (!buykorigw_rest_same_origin_allowed()) {
+    if (!buykorigw_rest_same_origin_allowed() || !buykorigw_rest_browser_token_valid($request)) {
         return new WP_REST_Response(array('success' => false, 'message' => 'Invalid origin'), 403);
     }
     if (!buykorigw_ensure_wc_cart_loaded()) {
@@ -1613,7 +1718,7 @@ function buykorigw_rest_get_atc_receipts()
 
 function buykorigw_rest_ack_atc_receipts(WP_REST_Request $request)
 {
-    if (!buykorigw_rest_same_origin_allowed()) {
+    if (!buykorigw_rest_same_origin_allowed() || !buykorigw_rest_browser_token_valid($request)) {
         return new WP_REST_Response(array('success' => false, 'message' => 'Invalid origin'), 403);
     }
     if (!buykorigw_ensure_wc_cart_loaded()) {
@@ -1635,6 +1740,7 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
 {
     $rest_nonce = $request->get_header('x-wp-nonce');
     $nonce_valid = !empty($rest_nonce) && wp_verify_nonce($rest_nonce, 'wp_rest');
+    $browser_token_valid = buykorigw_rest_browser_token_valid($request);
 
     // ─── Origin / Referer Validation ─────────────────────────────────────
     $allowed_host = parse_url(home_url(), PHP_URL_HOST);
@@ -1665,8 +1771,8 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
     // Public storefront pages are commonly cached longer than WordPress REST
     // nonces. Same-origin validation keeps cached tracking functional while
     // still rejecting cross-site event injection.
-    if (!$nonce_valid && empty($request_origin) && empty($request_referer)) {
-        return new WP_REST_Response(array('success' => false, 'message' => 'Missing request origin'), 403);
+    if (!$nonce_valid && !$browser_token_valid) {
+        return new WP_REST_Response(array('success' => false, 'message' => 'Missing or invalid browser token'), 403);
     }
 
     // ─── Parse Parameters ────────────────────────────────────────────────
@@ -1791,7 +1897,6 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
             $response['gateway_error'] = array_filter(array(
                 'message' => $last_error['message'] ?? '',
                 'code'    => $last_error['code'] ?? 0,
-                'body'    => $last_error['body'] ?? '',
             ));
         }
         return new WP_REST_Response($response, 502);

@@ -160,6 +160,8 @@ class AdPerformanceRow(BaseModel):
     placed_revenue: float
     placed_roas: float
     placed_cpa: float
+    pending_purchases: int = 0
+    cancelled_purchases: int = 0
     confirmed_purchases: int
     confirmed_revenue: float
     revenue_currency: str = ""
@@ -174,6 +176,9 @@ class AdPerformanceResponse(BaseModel):
     status: str
     period_days: int
     sync_enabled: bool = False
+    connected_accounts: int = 0
+    last_synced_at: Optional[datetime] = None
+    missing_attribution_purchases: int = 0
     data: list[AdPerformanceRow]
 
 
@@ -917,8 +922,9 @@ async def ad_performance_analytics(
     server_held_events AS (
         SELECT
             c.id AS campaign_pk,
-            COUNT(pe.id) AS purchases,
-            COALESCE(SUM({json_val_expr}), 0.0) AS revenue,
+            COALESCE(SUM(CASE WHEN pe.status IN ('pending', 'courier_booked', 'courier_booking_queued') THEN 1 ELSE 0 END), 0) AS purchases,
+            COALESCE(SUM(CASE WHEN pe.status IN ('pending', 'courier_booked', 'courier_booking_queued') THEN {json_val_expr} ELSE 0 END), 0.0) AS revenue,
+            COALESCE(SUM(CASE WHEN pe.status IN ('cancelled', 'expired') THEN 1 ELSE 0 END), 0) AS cancelled_purchases,
             MAX({json_currency_expr}) AS revenue_currency
         FROM pending_events pe
         JOIN ad_campaigns c ON ({json_camp_id_expr}) = c.external_campaign_id
@@ -963,10 +969,13 @@ async def ad_performance_analytics(
         -- Placed metrics = Confirmed + Held
         (COALESCE(sc.purchases, 0) + COALESCE(sh.purchases, 0)) AS placed_purchases,
         (COALESCE(sc.revenue, 0.0) + COALESCE(sh.revenue, 0.0)) AS placed_revenue,
+        COALESCE(sh.purchases, 0) AS pending_purchases,
+        COALESCE(sh.cancelled_purchases, 0) AS cancelled_purchases,
 
         -- Discrepancy metrics
         COALESCE(d.browser_views, 0) AS browser_page_views,
-        COALESCE(d.server_views, 0) AS server_page_views
+        COALESCE(d.server_views, 0) AS server_page_views,
+        a.last_synced_at AS account_last_synced_at
     FROM ad_campaigns c
     JOIN ad_accounts a ON c.ad_account_id = a.id
     LEFT JOIN platform_insights p ON c.external_campaign_id = p.external_campaign_id AND c.platform = p.platform
@@ -993,6 +1002,33 @@ async def ad_performance_analytics(
             detail="Error retrieving ad performance analytics from the database."
         )
 
+    account_meta = await db.execute(
+        select(
+            sql_func.count(AdAccount.id),
+            sql_func.max(AdAccount.last_synced_at),
+        ).where(
+            and_(
+                AdAccount.client_id == client.id,
+                AdAccount.is_active == True,
+            )
+        )
+    )
+    account_count, last_synced_at = account_meta.one()
+
+    missing_attr_result = await db.execute(
+        select(sql_func.coalesce(sql_func.sum(EventLog.event_count), 0)).where(
+            and_(
+                EventLog.client_id == client.id,
+                EventLog.event_name == "Purchase",
+                EventLog.status == "success",
+                EventLog.ad_campaign_id.is_(None),
+                EventLog.created_at >= datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc),
+                EventLog.created_at < datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+            )
+        )
+    )
+    missing_attribution_purchases = int(missing_attr_result.scalar() or 0)
+
     data = []
     for r in rows:
         spend = float(r.spend or 0.0)
@@ -1007,6 +1043,8 @@ async def ad_performance_analytics(
         placed_revenue = float(r.placed_revenue or 0.0)
         placed_roas = round((placed_revenue / spend) if spend > 0 else 0.0, 2)
         placed_cpa = round((spend / placed_purchases) if placed_purchases > 0 else 0.0, 2)
+        pending_purchases = int(getattr(r, "pending_purchases", 0) or 0)
+        cancelled_purchases = int(getattr(r, "cancelled_purchases", 0) or 0)
 
         confirmed_purchases = int(r.confirmed_purchases or 0)
         confirmed_revenue = float(r.confirmed_revenue or 0.0)
@@ -1037,6 +1075,8 @@ async def ad_performance_analytics(
                 placed_revenue=placed_revenue,
                 placed_roas=placed_roas,
                 placed_cpa=placed_cpa,
+                pending_purchases=pending_purchases,
+                cancelled_purchases=cancelled_purchases,
                 confirmed_purchases=confirmed_purchases,
                 confirmed_revenue=confirmed_revenue,
                 revenue_currency=revenue_currency,
@@ -1052,5 +1092,8 @@ async def ad_performance_analytics(
         status="success",
         period_days=days,
         sync_enabled=os.getenv("ENABLE_AD_SYNC", "").lower() in ("true", "1", "yes"),
+        connected_accounts=int(account_count or 0),
+        last_synced_at=last_synced_at,
+        missing_attribution_purchases=missing_attribution_purchases,
         data=data
     )

@@ -6,6 +6,7 @@ import socket
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import select, and_, or_
 from app.database import AsyncSessionLocal
+from app.models.incomplete_checkout import IncompleteCheckout
 from app.models.notification_job import NotificationJob
 from app.models.whatsapp_instance import WhatsAppInstance
 from app.models.client import Client
@@ -28,6 +29,47 @@ def _next_attempt_after(attempts: int) -> datetime:
     delays = [60, 300, 900]
     delay = delays[min(max(attempts - 1, 0), len(delays) - 1)]
     return _now() + timedelta(seconds=delay)
+
+
+def _clear_job_lock(job: NotificationJob) -> None:
+    job.locked_by = None
+    job.locked_until = None
+
+
+def _mark_retryable_failure(job: NotificationJob, error_message: str) -> None:
+    job.attempt_count += 1
+    job.status = "failed"
+    job.error_message = error_message[:500]
+    _clear_job_lock(job)
+    if job.attempt_count < job.max_attempts:
+        job.next_attempt_at = _next_attempt_after(job.attempt_count)
+    else:
+        job.next_attempt_at = None
+
+
+def _mark_permanent_failure(job: NotificationJob, error_message: str) -> None:
+    job.status = "failed"
+    job.attempt_count = job.max_attempts
+    job.error_message = error_message[:500]
+    job.next_attempt_at = None
+    _clear_job_lock(job)
+
+
+async def _cancel_stale_incomplete_checkout_job(db, job: NotificationJob) -> bool:
+    if job.event_type != "incomplete_checkout":
+        return False
+
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    checkout_id = payload.get("id")
+    checkout = await db.get(IncompleteCheckout, checkout_id) if checkout_id else None
+    if checkout and checkout.status == "incomplete":
+        return False
+
+    job.status = "cancelled"
+    job.error_message = "Checkout is no longer incomplete"
+    job.next_attempt_at = None
+    _clear_job_lock(job)
+    return True
 
 
 async def claim_due_jobs(db, limit: int = WORKER_BATCH_SIZE) -> list[NotificationJob]:
@@ -106,12 +148,13 @@ async def process_job(job_id: int) -> None:
         if not job or job.status == "sent" or job.attempt_count >= job.max_attempts:
             return
 
+        if await _cancel_stale_incomplete_checkout_job(db, job):
+            await db.commit()
+            return
+
         client = await db.get(Client, job.client_id)
         if not client or not client.is_active:
-            job.status = "failed"
-            job.error_message = "Client inactive or missing"
-            job.locked_by = None
-            job.locked_until = None
+            _mark_permanent_failure(job, "Client inactive or missing")
             await db.commit()
             return
 
@@ -121,18 +164,12 @@ async def process_job(job_id: int) -> None:
             instance = await db.get(WhatsAppInstance, job.whatsapp_instance_id)
 
         if not instance or instance.status != "active":
-            job.status = "failed"
-            job.error_message = "WhatsApp instance not active or missing"
-            job.locked_by = None
-            job.locked_until = None
+            _mark_retryable_failure(job, "WhatsApp instance not active or missing")
             await db.commit()
             return
 
         if not client.owner_whatsapp_number:
-            job.status = "failed"
-            job.error_message = "Client owner WhatsApp number is missing"
-            job.locked_by = None
-            job.locked_until = None
+            _mark_permanent_failure(job, "Client owner WhatsApp number is missing")
             await db.commit()
             return
 
@@ -140,6 +177,12 @@ async def process_job(job_id: int) -> None:
     await asyncio.sleep(random.uniform(3.0, 5.0))
 
     try:
+        async with AsyncSessionLocal() as db:
+            db_job = await db.get(NotificationJob, job_id)
+            if not db_job or await _cancel_stale_incomplete_checkout_job(db, db_job):
+                await db.commit()
+                return
+
         # Send text via provider
         await EvolutionWhatsAppProvider.send_text(
             instance_name=instance.instance_name,
@@ -156,8 +199,7 @@ async def process_job(job_id: int) -> None:
                 db_job.status = "sent"
                 db_job.sent_at = _now()
                 db_job.error_message = None
-                db_job.locked_by = None
-                db_job.locked_until = None
+                _clear_job_lock(db_job)
                 db_job.attempt_count += 1
             if db_instance:
                 db_instance.last_sent_at = _now()
@@ -169,17 +211,11 @@ async def process_job(job_id: int) -> None:
         async with AsyncSessionLocal() as db:
             db_job = await db.get(NotificationJob, job_id)
             if db_job:
-                db_job.attempt_count += 1
-                db_job.error_message = error_msg
-                db_job.locked_by = None
-                db_job.locked_until = None
-
+                _mark_retryable_failure(db_job, error_msg)
                 if db_job.attempt_count >= db_job.max_attempts:
                     db_job.status = "failed"
                     logger.error(f"WhatsApp notification job {job_id} permanently failed after {db_job.max_attempts} attempts: {error_msg}")
                 else:
-                    db_job.status = "failed"
-                    db_job.next_attempt_at = _next_attempt_after(db_job.attempt_count)
                     logger.warning(f"WhatsApp notification job {job_id} failed. Next retry at {db_job.next_attempt_at}. Error: {error_msg}")
             await db.commit()
 

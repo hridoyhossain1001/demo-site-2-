@@ -95,6 +95,7 @@ function buykorigw_sanitize_settings( $input ) {
     $sanitized = array();
     $existing = buykorigw_get_settings();
     $sanitized['api_key']            = sanitize_text_field( $input['api_key'] ?? ( $existing['api_key'] ?? '' ) );
+    $sanitized['capi_signing_secret'] = sanitize_text_field( $input['capi_signing_secret'] ?? ( $existing['capi_signing_secret'] ?? '' ) );
     $sanitized['gateway_url']        = esc_url_raw( $input['gateway_url'] ?? ( $existing['gateway_url'] ?? BUYKORIGW_DEFAULT_GATEWAY_URL ) );
     $sanitized['connected_site_host']   = sanitize_text_field( $input['connected_site_host'] ?? ( $existing['connected_site_host'] ?? '' ) );
     $sanitized['connected_client_name'] = sanitize_text_field( $input['connected_client_name'] ?? ( $existing['connected_client_name'] ?? '' ) );
@@ -364,6 +365,7 @@ function buykorigw_connect_callback() {
 
     $settings                          = buykorigw_get_settings();
     $settings['api_key']               = sanitize_text_field( $body['api_key'] );
+    $settings['capi_signing_secret']   = sanitize_text_field( $body['capi_signing_secret'] ?? ( $settings['capi_signing_secret'] ?? '' ) );
     $settings['gateway_url']           = esc_url_raw( $body['gateway_url'] );
     $settings['connected_site_host']   = sanitize_text_field( $body['site_host'] ?? '' );
     $settings['connected_client_name'] = sanitize_text_field( $body['client_name'] ?? '' );

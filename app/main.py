@@ -21,6 +21,7 @@ from app.routers.debug import router as debug_router
 from app.routers.client_auth import router as client_auth_router
 from app.routers.ad_accounts import router as ad_accounts_router
 from app.limiter import limiter
+from app.maintenance import migration_locked
 import os
 import asyncio
 import secrets
@@ -28,6 +29,9 @@ import secrets
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 if not ADMIN_API_KEY:
     raise RuntimeError("ADMIN_API_KEY environment variable is required.")
+ADMIN_JWT_SECRET = os.getenv("ADMIN_JWT_SECRET", "")
+if not ADMIN_JWT_SECRET:
+    raise RuntimeError("ADMIN_JWT_SECRET environment variable is required.")
 
 ENABLE_DOCS = os.getenv("ENABLE_DOCS", "").lower() in ("true", "1", "yes")
 STATUS_CACHE_SECONDS = float(os.getenv("STATUS_CACHE_SECONDS", "5"))
@@ -292,6 +296,9 @@ app.add_middleware(
 
 
 class RequestSizeLimitMiddleware:
+    class BodyLimitExceeded(Exception):
+        pass
+
     def __init__(self, app):
         self.app = app
 
@@ -320,10 +327,62 @@ class RequestSizeLimitMiddleware:
                 await response(scope, receive, send)
                 return
 
-        await self.app(scope, receive, send)
+        received_size = 0
+        response_started = False
+
+        async def limited_receive():
+            nonlocal received_size
+            message = await receive()
+            if message.get("type") == "http.request":
+                received_size += len(message.get("body") or b"")
+                if received_size > limit:
+                    raise self.BodyLimitExceeded()
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except self.BodyLimitExceeded:
+            if response_started:
+                raise
+            from starlette.responses import PlainTextResponse
+            response = PlainTextResponse("Request body too large", status_code=413)
+            await response(scope, receive, send)
 
 
 app.add_middleware(RequestSizeLimitMiddleware)
+
+
+class MigrationLockMiddleware:
+    SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] == "http"
+            and scope.get("method", "").upper() not in self.SAFE_METHODS
+            and migration_locked()
+        ):
+            from starlette.responses import JSONResponse
+
+            response = JSONResponse(
+                {"detail": "Service is temporarily read-only for maintenance."},
+                status_code=503,
+                headers={"Retry-After": "300"},
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(MigrationLockMiddleware)
 
 
 class SecurityHeadersMiddleware:
@@ -471,10 +530,23 @@ class SplitCORSMiddleware:
         # Inject CORS headers into actual response
         async def send_with_cors(message):
             if message["type"] == "http.response.start":
-                response_headers = list(message.get("headers", []))
+                response_headers = [
+                    (name, value)
+                    for name, value in list(message.get("headers", []))
+                    if name.lower() not in {
+                        b"access-control-allow-origin",
+                        b"access-control-allow-credentials",
+                    }
+                ]
                 response_headers.append((b"access-control-allow-origin", allow_origin.encode()))
                 response_headers.append((b"access-control-allow-credentials", allow_credentials.encode()))
-                response_headers.append((b"vary", b"Origin"))
+                vary_values = [
+                    value.decode("latin1")
+                    for name, value in response_headers
+                    if name.lower() == b"vary"
+                ]
+                if not any("origin" in {part.strip().lower() for part in value.split(",")} for value in vary_values):
+                    response_headers.append((b"vary", b"Origin"))
                 message = {**message, "headers": response_headers}
             await send(message)
 

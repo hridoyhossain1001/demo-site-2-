@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 # Set up environment variables required by the app before importing it
 os.environ["ADMIN_PASSWORD"] = "pbkdf2_sha256$210000$dGVzdC1hZG1pbi1zYWx0LTE=$9gwSQUsI_uzxaNpdvx_cOcpF4opgO7Ma_Hcmq3z4kSU="
 os.environ["ADMIN_API_KEY"] = "test-admin-api-key"
+os.environ["ADMIN_JWT_SECRET"] = "test-admin-jwt-secret"
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["ENCRYPTION_KEY"] = "ZFhnf1szwemka8kBbH9jPTC7oKBRTEv0EqWt1J8AD0M="
 
@@ -25,6 +26,7 @@ from app.models.courier_order import CourierOrder
 from app.models.pending_event import PendingEvent
 from app.security import encrypt_token
 from app.services.auth_service import hash_password, hash_session_token
+from app.utils.display import mask_secret
 from app.utils.plugin_connect import pkce_challenge
 
 # Setup clean async database engine for testing
@@ -583,7 +585,7 @@ async def test_admin_api_login_success():
     # Verify it is a valid JWT
     jwt_token = data["admin_api_key"]
     from app.routers.admin_api import decode_jwt
-    payload = decode_jwt(jwt_token, "test-admin-api-key")
+    payload = decode_jwt(jwt_token, "test-admin-jwt-secret")
     assert payload["sub"] == "admin"
     set_cookie = response.headers.get("set-cookie", "")
     assert "buykori_admin_session=" in set_cookie
@@ -641,6 +643,38 @@ async def test_admin_api_login_failed_wrong_credentials():
     )
     assert response.status_code == 401
     assert "Incorrect username or password" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+async def test_admin_api_client_detail_masks_portal_key():
+    raw_portal_key = "portal-secret-1234567890"
+    async with TestingSessionLocal() as session:
+        client_row = Client(
+            name="Portal Mask Store",
+            api_key="portal-mask-api-key",
+            public_key="portal-mask-public-key",
+            portal_key=raw_portal_key,
+            pixel_id="123456789",
+            access_token=encrypt_token("fb-token"),
+            domain="portal-mask.example.com",
+            is_active=True,
+        )
+        session.add(client_row)
+        await session.commit()
+        client_id = client_row.id
+
+    api_client = TestClient(app)
+    response = api_client.get(
+        f"/api/v1/admin/api/clients/{client_id}",
+        headers={"X-Admin-API-Key": "test-admin-api-key"},
+    )
+
+    assert response.status_code == 200
+    client_payload = response.json()["client"]
+    assert client_payload["portal_key"] == mask_secret(raw_portal_key)
+    assert client_payload["portal_key"] != raw_portal_key
+    assert client_payload["portal_key_masked"] is True
+    assert client_payload["public_key"] == "portal-mask-public-key"
 
 
 @pytest.mark.anyio

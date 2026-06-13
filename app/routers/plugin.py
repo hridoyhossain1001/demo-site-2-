@@ -28,6 +28,7 @@ from app.services.plan_service import (
     trial_active,
 )
 from app.services.site_binding_service import get_active_site_binding, upsert_active_site_binding
+from app.services.client_secrets import ensure_capi_signing_secret
 from app.utils.plugin_package import plugin_protection_enabled, protect_plugin_package_content
 from app.utils.plugin_connect import (
     gateway_url_from_request,
@@ -467,13 +468,13 @@ def _gateway_base_url(request: Request) -> str:
     return f"{scheme}://{raw_host}"
 
 
-def _generate_preconfigured_zip(api_key: str, gateway_url: str) -> io.BytesIO:
+def _generate_preconfigured_zip(api_key: str, gateway_url: str, capi_signing_secret: str = "") -> io.BytesIO:
     """
     ডাইনামিকালি প্রিকনফিগার্ড জিপ তৈরি করে।
     ক্লায়েন্টের API Key এবং Gateway URL আগে থেকেই embed করে দেয়
     যাতে ইনস্টল করার পর কোনো ম্যানুয়াল কনফিগারেশন দরকার না হয়।
     """
-    cache_key = (api_key, gateway_url)
+    cache_key = (api_key, gateway_url, capi_signing_secret)
     if not re.fullmatch(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", gateway_url):
         raise HTTPException(status_code=500, detail="Invalid generated gateway URL")
     if cache_key in _PRECONFIGURED_ZIP_CACHE:
@@ -502,6 +503,11 @@ def _generate_preconfigured_zip(api_key: str, gateway_url: str) -> io.BytesIO:
                     text = re.sub(
                         r"(['\"]gateway_url['\"]\s*=>\s*)(BUYKORIGW_DEFAULT_GATEWAY_URL|['\"].*?['\"])\s*,",
                         lambda m: f"{m.group(1)}'{gateway_url}',",
+                        text,
+                    )
+                    text = re.sub(
+                        r"(['\"]capi_signing_secret['\"]\s*=>\s*)(['\"]{2}|['\"].*?['\"])\s*,",
+                        lambda m: f"{m.group(1)}'{capi_signing_secret}',",
                         text,
                     )
                     content = text.encode("utf-8")
@@ -595,6 +601,7 @@ async def plugin_connect_exchange(
     )
     session.used_at = now
     client.updated_at = now
+    capi_signing_secret = ensure_capi_signing_secret(client)
     db.add(AuditLog(
         actor="wordpress_plugin",
         action="plugin_connect_exchanged",
@@ -609,6 +616,7 @@ async def plugin_connect_exchange(
         "client_name": client.name,
         "site_host": session.site_host,
         "api_key": client.api_key,
+        "capi_signing_secret": capi_signing_secret,
         "public_key": client.public_key or "",
         "gateway_url": gateway_url_from_request(request),
         "plan_warning": plan_warning,
@@ -696,7 +704,9 @@ async def plugin_download(
 
         if PLUGIN_SOURCE_DIR.is_dir():
             gateway_url = _build_gateway_url(request)
-            buf = _generate_preconfigured_zip(resolved_api_key, gateway_url)
+            capi_signing_secret = ensure_capi_signing_secret(client)
+            await db.commit()
+            buf = _generate_preconfigured_zip(resolved_api_key, gateway_url, capi_signing_secret)
             return StreamingResponse(
                 buf,
                 media_type="application/zip",

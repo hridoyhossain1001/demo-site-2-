@@ -789,6 +789,7 @@
             _ga: getCookie('_ga') || '',
             ga_session_id: ga4SessionId
         };
+        if (cfg.browser_token) payload._buykori_browser_token = cfg.browser_token;
 
         triggerHybridPixel(eventName, eventData, eventId);
 
@@ -817,6 +818,7 @@
                 if (cfg.rest_url) {
                     xhr.setRequestHeader('Content-Type', 'application/json');
                     if (cfg.rest_nonce) xhr.setRequestHeader('X-WP-Nonce', cfg.rest_nonce);
+                    if (cfg.browser_token) xhr.setRequestHeader('X-Buykori-Browser-Token', cfg.browser_token);
                     xhr.send(jsonBody);
                 } else {
                     xhr.send(buildAjaxFormData(eventName, eventData, eventId));
@@ -952,6 +954,7 @@
         if ((attempt || 0) === 0) queueRestEvent(jsonBody);
         var headers = {'Content-Type': 'application/json'};
         if (cfg.rest_nonce) headers['X-WP-Nonce'] = cfg.rest_nonce;
+        if (cfg.browser_token) headers['X-Buykori-Browser-Token'] = cfg.browser_token;
         fetch(cfg.rest_url, {
             method: 'POST',
             headers: headers,
@@ -1761,6 +1764,7 @@
 
     function postIncompleteCheckoutPayload(payload, synchronous) {
         if (!payload || !cfg.incomplete_checkout_url) return false;
+        if (cfg.browser_token) payload._buykori_browser_token = cfg.browser_token;
         var body = JSON.stringify(payload);
 
         if (synchronous && navigator.sendBeacon) {
@@ -1776,6 +1780,7 @@
                 xhr.open('POST', cfg.incomplete_checkout_url, false);
                 xhr.setRequestHeader('Content-Type', 'application/json');
                 if (cfg.rest_nonce) xhr.setRequestHeader('X-WP-Nonce', cfg.rest_nonce);
+                if (cfg.browser_token) xhr.setRequestHeader('X-Buykori-Browser-Token', cfg.browser_token);
                 xhr.send(body);
                 return true;
             } catch(e) {
@@ -1790,7 +1795,8 @@
             keepalive: true,
             headers: {
                 'Content-Type': 'application/json',
-                'X-WP-Nonce': cfg.rest_nonce || ''
+                'X-WP-Nonce': cfg.rest_nonce || '',
+                'X-Buykori-Browser-Token': cfg.browser_token || ''
             },
             body: body
         }).catch(function() {});

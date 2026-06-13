@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 .initial-credentials
+.backups/
 
 __pycache__/
 *.py[cod]

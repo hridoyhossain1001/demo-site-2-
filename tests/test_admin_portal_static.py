@@ -58,3 +58,46 @@ def test_admin_portal_contains_recovery_and_notification_operations_contract():
     assert ".queue-health-banner" in styles_css
     assert ".queue-drawer" in styles_css
     assert ".support-note" in styles_css
+
+
+def test_admin_login_does_not_trim_password_before_submit():
+    app_js = (WORKSPACE / "admin-portal" / "app.js").read_text(encoding="utf-8")
+    login_block = app_js.split("async function loginAdmin()", 1)[1].split("async function logoutAdmin()", 1)[0]
+
+    assert 'const username = $("adminUsername").value.trim();' in login_block
+    assert 'const password = $("adminPassword").value;' in login_block
+    assert '$("adminPassword").value.trim()' not in login_block
+    assert "JSON.stringify({ username, password })" in login_block
+
+
+def test_admin_events_label_reconstructed_samples():
+    app_js = (WORKSPACE / "admin-portal" / "app.js").read_text(encoding="utf-8")
+    admin_api = (WORKSPACE / "app" / "routers" / "admin_api.py").read_text(encoding="utf-8")
+    events_block = app_js.split("function renderEvents()", 1)[1].split("function toggleEventDetail", 1)[0]
+
+    assert '"isReconstructedSample": True' in admin_api
+    assert '"sampleNotice": "Payload, headers, HTTP code, and upstream response are reconstructed' in admin_api
+    assert "const sampleLabel = event.isReconstructedSample ? \" (reconstructed sample)\" : \"\";" in events_block
+    assert "event.sampleNotice" in events_block
+    assert "Payload${sampleLabel}" in events_block
+    assert "HTTP Headers${sampleLabel}" in events_block
+    assert "Upstream Response${sampleLabel}" in events_block
+
+
+def test_admin_order_quota_is_clearly_plan_derived():
+    index_html = (WORKSPACE / "admin-portal" / "index.html").read_text(encoding="utf-8")
+
+    assert "Monthly Order Limit (Plan-derived)" in index_html
+    assert 'id="editOrderLimit" readonly aria-readonly="true"' in index_html
+    assert "change the plan to update this limit" in index_html
+
+
+def test_admin_modal_does_not_preload_existing_secrets():
+    app_js = (WORKSPACE / "admin-portal" / "app.js").read_text(encoding="utf-8")
+    modal_block = app_js.split("async function openClientModal", 1)[1].split("async function saveClientEdit", 1)[0]
+
+    assert 'modalSecrets.set("keyApi", c.api_key || "")' not in modal_block
+    assert 'modalSecrets.set("keyPortal", c.portal_key || "")' not in modal_block
+    assert 'modalSecrets.set("keyToken", c.access_token || "")' not in modal_block
+    assert "Existing secrets are masked server-side" in modal_block
+    assert "<rotate-or-copy-current-api-key>" in modal_block

@@ -421,6 +421,7 @@ async def process_outbox_row(row_id: int) -> None:
         delivery_res = await deliver_events_to_platforms(client, events, context)
         primary_platform = delivery_res["primary_platform"]
         result = delivery_res["result"]
+        primary_events = delivery_res.get("primary_events") or []
         await wait_for_secondary_tasks(delivery_res)
 
         async with AsyncSessionLocal() as db:
@@ -467,10 +468,10 @@ async def process_outbox_row(row_id: int) -> None:
             row.locked_by = None
             row.last_error = None
 
-            events_data = [event.model_dump(exclude_none=True) for event in events]
             if USAGE_RESERVATION_MODE == "worker" and not usage_reserved:
                 await increment_usage_counters_db(db, client, len(events))
-            for event_data in events_data:
+            primary_events_data = [event.model_dump(exclude_none=True) for event in primary_events]
+            for event_data in primary_events_data:
                 db.add(EventLog(**_event_log_kwargs(
                     client.id,
                     event_data,
@@ -482,7 +483,7 @@ async def process_outbox_row(row_id: int) -> None:
                 )))
             await db.commit()
 
-            logger.debug(f"[{client.name}] Outbox row {row.id} sent ({len(events)} events) via {primary_platform}.")
+            logger.debug(f"[{client.name}] Outbox row {row.id} sent ({len(primary_events)} primary events) via {primary_platform}.")
 
     except Exception as exc:
         async with AsyncSessionLocal() as db:
@@ -541,6 +542,7 @@ async def process_event_outbox_forever() -> None:
 
 
 if __name__ == "__main__":
+    from app.maintenance import migration_locked
     from app.services.cleanup_service import auto_cleanup_database
     from app.services.expiry_service import expire_old_pending_events, run_incomplete_checkout_refresh_loop
     from app.services.retry_service import retry_failed_events
@@ -548,6 +550,9 @@ if __name__ == "__main__":
     from app.services.courier_booking_service import process_courier_booking_jobs_forever
 
     async def main() -> None:
+        while migration_locked():
+            logger.warning("Migration lock is active; background workers are paused.")
+            await asyncio.sleep(5)
         await asyncio.gather(
             bridge_redis_stream_forever(),
             process_event_outbox_forever(),

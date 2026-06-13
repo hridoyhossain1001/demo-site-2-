@@ -153,6 +153,7 @@ function buykorigw_inject_tracker() {
         'store_cart_url' => rest_url( 'wc/store/v1/cart' ),
         'nonce'       => wp_create_nonce( 'buykorigw_track_nonce' ),
         'rest_nonce'  => wp_create_nonce( 'wp_rest' ),
+        'browser_token' => function_exists( 'buykorigw_create_rest_browser_token' ) ? buykorigw_create_rest_browser_token( $settings ) : '',
         'tracking_mode' => buykorigw_resolve_tracking_mode( $settings ),
         'content_id_format' => isset( $settings['content_id_format'] ) ? $settings['content_id_format'] : 'id',
         'currency' => function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : 'BDT',
@@ -516,9 +517,7 @@ function buykorigw_normalize_campaign_value( $key, $value ) {
 
 function buykorigw_ajax_rate_limited( $event_name = '' ) {
     $critical_events = array( 'Purchase', 'InitiateCheckout', 'AddPaymentInfo', 'Refund' );
-    if ( in_array( $event_name, $critical_events, true ) ) {
-        return false;
-    }
+    $is_critical_event = in_array( $event_name, $critical_events, true );
 
     $visitor_id = isset( $_COOKIE['_buykorigw_vid'] ) ? sanitize_text_field( wp_unslash( $_COOKIE['_buykorigw_vid'] ) ) : '';
     $ip         = sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' );
@@ -530,8 +529,11 @@ function buykorigw_ajax_rate_limited( $event_name = '' ) {
     $window     = 60;
     $bucket     = (int) floor( time() / $window );
     $scope      = $visitor_id ? 'vid' : 'ip';
-    $limit      = $visitor_id ? 120 : 240;
-    $cache_key  = 'buykorigw_ajax_rate_' . $scope . '_' . md5( $identity ) . '_' . $bucket;
+    $limit      = $is_critical_event
+        ? ( $visitor_id ? 240 : 480 )
+        : ( $visitor_id ? 120 : 240 );
+    $event_key  = sanitize_key( $event_name ?: 'event' );
+    $cache_key  = 'buykorigw_ajax_rate_' . $scope . '_' . $event_key . '_' . md5( $identity ) . '_' . $bucket;
     $hit_count  = (int) get_transient( $cache_key );
 
     if ( $hit_count >= $limit ) {
@@ -882,35 +884,18 @@ function buykorigw_track_purchase( $order_id ) {
     }
 
     $sent = false;
+    $failure_status = 'send_failed';
 
     // If deferred_purchase is ON, send with hold=true query param
     if ( $settings['deferred_purchase'] ) {
-        $url = rtrim( $settings['gateway_url'], '/' ) . '/events?hold=true';
-        $body = wp_json_encode( array( 'data' => array( $event_payload ) ) );
-        $site_origin = function_exists( 'buykorigw_site_origin' ) ? buykorigw_site_origin() : home_url();
-        $headers = array_merge( array(
-            'Content-Type'   => 'application/json',
-            'X-API-Key'      => $settings['api_key'],
-            'X-CAPI-Origin'  => $site_origin,
-        ), buykorigw_signed_headers( $settings['api_key'], $body ) );
-
-        $response = wp_remote_post( $url, array(
-            'timeout'   => 10,
-            'sslverify' => true,
-            'headers'   => $headers,
-            'body'      => $body,
-        ) );
-
-        if ( is_wp_error( $response ) ) {
-            // Critical failure — always log regardless of debug_mode
-            error_log( '[Buykori AdSync] Deferred purchase send failed for order #' . $order_id . ': ' . $response->get_error_message() );
-        }
-
-        if ( ! is_wp_error( $response ) ) {
-            $code = wp_remote_retrieve_response_code( $response );
-            $sent = ( $code >= 200 && $code < 300 );
-            if ( ! $sent && $settings['debug_mode'] ) {
-                error_log( '[Buykori AdSync] Deferred purchase HTTP ' . $code . ': ' . wp_remote_retrieve_body( $response ) );
+        $sent = buykorigw_send_event( $event_payload, true, true, true );
+        if ( ! $sent ) {
+            $last_error = function_exists( 'buykorigw_get_last_event_error' ) ? buykorigw_get_last_event_error() : array();
+            $message = ! empty( $last_error['message'] ) ? ': ' . $last_error['message'] : '';
+            error_log( '[Buykori AdSync] Deferred purchase send failed for order #' . $order_id . $message );
+            if ( (int) ( $last_error['code'] ?? 0 ) === 403 && ! empty( $last_error['terminal'] ) ) {
+                $failure_status = 'deferred_configuration_mismatch';
+                $order->add_order_note( '[Buykori AdSync] Deferred Purchase is disabled for this Buykori account. Disable it in the plugin or enable it in Buykori.' );
             }
         }
     } else {
@@ -920,7 +905,7 @@ function buykorigw_track_purchase( $order_id ) {
 
     // Mark as tracked to prevent duplicates
     if ( ! $sent ) {
-        buykorigw_update_order_meta( $order_id, '_buykorigw_confirm_status', 'send_failed' );
+        buykorigw_update_order_meta( $order_id, '_buykorigw_confirm_status', $failure_status );
         buykorigw_release_purchase_lock( $order_id );
         return;
     }
@@ -937,26 +922,100 @@ function buykorigw_track_purchase( $order_id ) {
 
 
 // ─── Helper: Get Real Client IP ────────────────────────────────────────────────
-function buykorigw_get_real_ip() {
-    $headers = array(
-        'HTTP_CF_CONNECTING_IP',   // Cloudflare
-        'HTTP_X_FORWARDED_FOR',    // Proxies
-        'HTTP_X_REAL_IP',          // Nginx
-        'REMOTE_ADDR',             // Default
-    );
+function buykorigw_ip_in_cidr( $ip, $cidr ) {
+    $ip = trim( (string) $ip );
+    $cidr = trim( (string) $cidr );
+    if ( $ip === '' || $cidr === '' ) {
+        return false;
+    }
 
-    foreach ( $headers as $header ) {
-        if ( ! empty( $_SERVER[ $header ] ) ) {
-            $ip = $_SERVER[ $header ];
-            // X-Forwarded-For can have multiple IPs, take the first
-            if ( strpos( $ip, ',' ) !== false ) {
-                $ip = trim( explode( ',', $ip )[0] );
-            }
-            if ( filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
-                return $ip;
+    if ( strpos( $cidr, '/' ) === false ) {
+        return $ip === $cidr;
+    }
+
+    list( $network, $bits ) = explode( '/', $cidr, 2 );
+    $ip_bin = inet_pton( $ip );
+    $network_bin = inet_pton( trim( $network ) );
+    if ( $ip_bin === false || $network_bin === false || strlen( $ip_bin ) !== strlen( $network_bin ) ) {
+        return false;
+    }
+
+    $bits = (int) $bits;
+    $max_bits = strlen( $ip_bin ) * 8;
+    if ( $bits < 0 || $bits > $max_bits ) {
+        return false;
+    }
+
+    $full_bytes = intdiv( $bits, 8 );
+    $remaining_bits = $bits % 8;
+    if ( $full_bytes && substr( $ip_bin, 0, $full_bytes ) !== substr( $network_bin, 0, $full_bytes ) ) {
+        return false;
+    }
+    if ( $remaining_bits === 0 ) {
+        return true;
+    }
+
+    $mask = ( 0xff << ( 8 - $remaining_bits ) ) & 0xff;
+    return ( ord( $ip_bin[ $full_bytes ] ) & $mask ) === ( ord( $network_bin[ $full_bytes ] ) & $mask );
+}
+
+function buykorigw_get_trusted_proxy_cidrs() {
+    $settings = function_exists( 'buykorigw_get_settings' ) ? buykorigw_get_settings() : array();
+    $configured = $settings['trusted_proxy_cidrs'] ?? array();
+    if ( is_string( $configured ) ) {
+        $configured = preg_split( '/[\s,]+/', $configured );
+    }
+    if ( ! is_array( $configured ) ) {
+        $configured = array();
+    }
+
+    if ( function_exists( 'apply_filters' ) ) {
+        $configured = apply_filters( 'buykorigw_trusted_proxy_cidrs', $configured );
+    }
+    if ( ! is_array( $configured ) ) {
+        return array();
+    }
+
+    return array_values( array_filter( array_map( 'trim', array_map( 'strval', $configured ) ) ) );
+}
+
+function buykorigw_remote_addr_is_trusted_proxy( $remote_addr ) {
+    $remote_addr = trim( (string) $remote_addr );
+    if ( $remote_addr === '' ) {
+        return false;
+    }
+
+    foreach ( buykorigw_get_trusted_proxy_cidrs() as $cidr ) {
+        if ( buykorigw_ip_in_cidr( $remote_addr, $cidr ) ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function buykorigw_get_real_ip() {
+    $remote_addr = sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '' );
+
+    if ( buykorigw_remote_addr_is_trusted_proxy( $remote_addr ) ) {
+        $headers = array(
+            'HTTP_CF_CONNECTING_IP',   // Cloudflare
+            'HTTP_X_FORWARDED_FOR',    // Proxies
+            'HTTP_X_REAL_IP',          // Nginx
+        );
+
+        foreach ( $headers as $header ) {
+            if ( ! empty( $_SERVER[ $header ] ) ) {
+                $ip = sanitize_text_field( wp_unslash( $_SERVER[ $header ] ) );
+                // X-Forwarded-For can have multiple IPs, take the first
+                if ( strpos( $ip, ',' ) !== false ) {
+                    $ip = trim( explode( ',', $ip )[0] );
+                }
+                if ( filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
+                    return $ip;
+                }
             }
         }
     }
 
-    return $_SERVER['REMOTE_ADDR'] ?? '';
+    return $remote_addr;
 }

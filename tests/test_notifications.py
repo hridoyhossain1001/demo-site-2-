@@ -18,6 +18,9 @@ from app.services.notification_service import (
     format_purchase_message,
 )
 from app.services.notification_worker import (
+    _cancel_stale_incomplete_checkout_job,
+    _mark_permanent_failure,
+    _mark_retryable_failure,
     _next_attempt_after,
     claim_due_jobs,
     process_jobs_with_instance_limits,
@@ -168,6 +171,35 @@ async def test_worker_reclaims_expired_processing_jobs():
 
 
 @pytest.mark.asyncio
+async def test_worker_cancels_incomplete_alert_after_order_match():
+    engine, Session = await _memory_session()
+    async with Session() as db:
+        checkout = _mock_checkout()
+        checkout.status = "ignored"
+        db.add(checkout)
+        job = NotificationJob(
+            client_id=1,
+            whatsapp_instance_id=1,
+            event_type="incomplete_checkout",
+            payload={"id": checkout.id},
+            dedupe_key="stale_incomplete_alert",
+            status="processing",
+            locked_by="worker",
+            locked_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+        )
+        db.add(job)
+        await db.commit()
+
+        cancelled = await _cancel_stale_incomplete_checkout_job(db, job)
+
+    await engine.dispose()
+    assert cancelled is True
+    assert job.status == "cancelled"
+    assert job.locked_by is None
+    assert job.locked_until is None
+
+
+@pytest.mark.asyncio
 async def test_same_instance_jobs_are_processed_serially(monkeypatch):
     import app.services.notification_worker as worker
 
@@ -202,3 +234,39 @@ def test_next_attempt_backoff_times():
     assert 55 < (t1 - now).total_seconds() < 65
     assert 295 < (t2 - now).total_seconds() < 305
     assert 895 < (t3 - now).total_seconds() < 905
+
+
+def test_retryable_failure_increments_attempt_and_releases_lock():
+    job = NotificationJob(
+        status="processing",
+        attempt_count=0,
+        max_attempts=4,
+        locked_by="worker",
+        locked_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    _mark_retryable_failure(job, "WhatsApp instance missing")
+
+    assert job.status == "failed"
+    assert job.attempt_count == 1
+    assert job.next_attempt_at is not None
+    assert job.locked_by is None
+    assert job.locked_until is None
+
+
+def test_permanent_failure_exhausts_attempts_and_releases_lock():
+    job = NotificationJob(
+        status="processing",
+        attempt_count=0,
+        max_attempts=4,
+        locked_by="worker",
+        locked_until=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+
+    _mark_permanent_failure(job, "Client inactive")
+
+    assert job.status == "failed"
+    assert job.attempt_count == 4
+    assert job.next_attempt_at is None
+    assert job.locked_by is None
+    assert job.locked_until is None

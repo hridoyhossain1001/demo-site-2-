@@ -526,8 +526,8 @@ async def client_update_setup(
     await db.commit()
 
     # Clear dependency cache so new settings take effect
-    from app.dependencies import clear_client_cache
-    clear_client_cache(c.api_key)
+    from app.dependencies import invalidate_client_cache
+    await invalidate_client_cache(c.api_key)
 
     return {
         "status": "success",

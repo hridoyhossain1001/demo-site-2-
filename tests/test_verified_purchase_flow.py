@@ -9,8 +9,10 @@ os.environ.setdefault("DATABASE_URL", "postgresql://user:pass@localhost:5432/tes
 os.environ.setdefault("ENCRYPTION_KEY", "ZFhnf1szwemka8kBbH9jPTC7oKBRTEv0EqWt1J8AD0M=")
 
 from app.routers.client_health import ClientSetupRequest, client_update_setup
-from app.routers.deferred_events import BulkConfirmRequest, ConfirmRequest
+from app.routers.deferred_events import BulkConfirmRequest, ConfirmRequest, _pending_event_value, _safe_numeric_value
+from app.routers.events import _event_order_id
 from app.routers.webhook import _woocommerce_status_meets_threshold
+from app.schemas.event import CustomData, EventData
 from app.security import decrypt_token
 
 
@@ -37,6 +39,31 @@ class _FakeDb:
 def test_deferred_confirm_requests_normalize_order_ids():
     assert ConfirmRequest(order_id="  1001  ").order_id == "1001"
     assert BulkConfirmRequest(order_ids=[" 1001 ", "1001", "", "1002"]).order_ids == ["1001", "1002"]
+
+
+def test_deferred_summary_value_parsing_ignores_non_numeric_values():
+    assert _safe_numeric_value("1,250.50") == 1250.5
+    assert _safe_numeric_value("not-a-number") == 0.0
+    assert _safe_numeric_value(True) == 0.0
+    assert _pending_event_value({"custom_data": {"value": "not-a-number"}}) == 0.0
+    assert _pending_event_value({"custom_data": {"value": "950"}}) == 950.0
+
+
+def test_event_order_id_fallback_is_stable_without_order_or_event_id():
+    payload = {
+        "event_name": "Purchase",
+        "event_time": 1710000000,
+        "event_source_url": "https://example.com/checkout/order-received",
+        "custom_data": CustomData(value=1250, currency="BDT", content_ids=["sku-1"]),
+        "raw_order_data": {"recipient_phone": "01816101745", "items": [{"id": "sku-1", "quantity": 1}]},
+    }
+
+    first = _event_order_id(EventData(**payload))
+    second = _event_order_id(EventData(**payload))
+
+    assert first == second
+    assert first.startswith("auto-1710000000-")
+    assert str(id(EventData(**payload))) not in first
 
 
 def test_woocommerce_confirmation_status_respects_configured_threshold():

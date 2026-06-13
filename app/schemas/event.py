@@ -13,7 +13,7 @@ def _clean_and_hash(val: Any, field: str) -> str:
     if not isinstance(val, str):
         val = str(val)
     if not val.strip():
-        return val
+        return ""
 
     val = val.strip().lower()
     if re.match(r"^[a-f0-9]{64}$", val):

@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import csv
+import os
 from pathlib import Path
 import secrets
 import sys
@@ -19,8 +20,20 @@ def random_email(client_id: int) -> str:
     return f"client-{client_id}-{secrets.token_hex(4)}@client.buykori.app"
 
 
+CSV_FIELDS = ["client_id", "client_name", "email", "password"]
+
+
 def random_password() -> str:
     return f"Bk-{secrets.token_urlsafe(12)}-7"
+
+
+def write_credentials_csv(csv_path: str, rows: list[dict[str, str]]) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(csv_path, flags, 0o600)
+    with os.fdopen(fd, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 async def run(apply: bool, csv_path: str | None) -> int:
@@ -61,14 +74,17 @@ async def run(apply: bool, csv_path: str | None) -> int:
             await db.commit()
 
     if csv_path:
-        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["client_id", "client_name", "email", "password"])
-            writer.writeheader()
-            writer.writerows(rows)
+        write_credentials_csv(csv_path, rows)
+        print(
+            f"WARNING: wrote one-time portal credentials to {csv_path} with file mode 0600. "
+            "Move it to a secure channel and delete it after delivery.",
+            file=sys.stderr,
+        )
     else:
-        writer = csv.DictWriter(sys.stdout, fieldnames=["client_id", "client_name", "email", "password"])
+        summary_fields = ["client_id", "client_name", "email"]
+        writer = csv.DictWriter(sys.stdout, fieldnames=summary_fields)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows([{key: row[key] for key in summary_fields} for row in rows])
 
     action = "created" if apply else "would_create"
     print(f"{action}={len(rows)}", file=sys.stderr)
@@ -85,6 +101,8 @@ def main() -> None:
 
     if not args.apply:
         print("Dry run only. Re-run with --apply to write users.", file=sys.stderr)
+    elif not args.csv:
+        raise SystemExit("--csv is required with --apply so generated passwords are not printed to stdout.")
 
     asyncio.run(run(args.apply, args.csv))
 

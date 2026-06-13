@@ -40,6 +40,11 @@ def _get_redis():
     return get_redis()
 
 
+def _counter_client_id(client, reserved_keys: dict, window_key: str) -> int:
+    counter_client_ids = reserved_keys.get("_counter_client_ids") or {}
+    return int(counter_client_ids.get(window_key, client.id))
+
+
 async def check_rate_limit_only(client, incoming_event_count: int) -> None:
     """Fast best-effort per-minute rate limit for Redis stream hot paths."""
     rate_limit = getattr(client, "rate_limit", None) or 5000
@@ -122,6 +127,42 @@ async def _atomic_reserve(
             return row.count
 
 
+async def _atomic_reserve_shared_monthly(
+    db: AsyncSession,
+    billing_client_id: int,
+    shared_client_ids: list[int],
+    legacy_window_key: str,
+    shared_window_key: str,
+    event_count: int,
+) -> int:
+    """Atomically initialize a shared counter from legacy store counters, then reserve."""
+    if engine.dialect.name == "postgresql":
+        legacy_total = (
+            select(func.coalesce(func.sum(UsageCounter.count), 0))
+            .where(
+                UsageCounter.client_id.in_(shared_client_ids),
+                UsageCounter.window_key == legacy_window_key,
+            )
+            .scalar_subquery()
+        )
+        stmt = (
+            pg_insert(UsageCounter)
+            .values(
+                client_id=billing_client_id,
+                window_key=shared_window_key,
+                count=legacy_total + event_count,
+            )
+            .on_conflict_do_update(
+                constraint="uq_client_window",
+                set_={"count": UsageCounter.count + event_count},
+            )
+            .returning(UsageCounter.count)
+        )
+        result = await db.execute(stmt)
+        return result.scalar()
+    return await _atomic_reserve(db, billing_client_id, shared_window_key, event_count)
+
+
 async def _atomic_rollback(
     db: AsyncSession,
     client_id: int,
@@ -150,7 +191,8 @@ async def _rollback_redis_counters(client, reserved_keys: dict[str, int]) -> boo
     try:
         pipe = r.pipeline()
         for window_key, event_count in counter_keys.items():
-            pipe.decrby(f"usage:{client.id}:{window_key}", event_count)
+            target_client_id = _counter_client_id(client, reserved_keys, window_key)
+            pipe.decrby(f"usage:{target_client_id}:{window_key}", event_count)
         await pipe.execute()
         logger.info(f"[{client.name}] Usage reservation rolled back in Redis: {len(counter_keys)} windows")
         return True
@@ -204,12 +246,19 @@ async def check_and_reserve_usage(
     Returns: dict of {window_key: event_count} — rollback-এ ব্যবহার হবে
     """
     shared_client_ids = await get_shared_billing_client_ids(db, client.id)
+    billing_counter_client_id = min(shared_client_ids)
     now = datetime.now(timezone.utc)
     rate_limit = getattr(client, "rate_limit", None) or 5000
     reserved_keys: dict[str, int] = {}
     minute_key = f"rate:{now.strftime('%Y-%m-%dT%H:%M')}"
     daily_key = f"daily:{now.strftime('%Y-%m-%d')}"
-    monthly_key = f"monthly:{now.strftime('%Y-%m')}"
+    legacy_monthly_key = f"monthly:{now.strftime('%Y-%m')}"
+    shared_monthly_quota = len(shared_client_ids) > 1 and bool(getattr(client, "monthly_limit", None))
+    monthly_key = (
+        f"billing-monthly:{now.strftime('%Y-%m')}"
+        if shared_monthly_quota
+        else legacy_monthly_key
+    )
     reservations = [
         (minute_key, incoming_event_count),
         (daily_key, incoming_event_count),
@@ -222,7 +271,8 @@ async def check_and_reserve_usage(
             pipe = r.pipeline()
             ttl_map = {minute_key: 65, daily_key: 90000, monthly_key: 2678400}
             for window_key, event_count in reservations:
-                rkey = f"usage:{client.id}:{window_key}"
+                target_client_id = billing_counter_client_id if window_key == monthly_key else client.id
+                rkey = f"usage:{target_client_id}:{window_key}"
                 pipe.incrby(rkey, event_count)
                 pipe.expire(rkey, ttl_map[window_key], nx=True)
             results = await pipe.execute()
@@ -235,25 +285,19 @@ async def check_and_reserve_usage(
             daily_quota = getattr(client, "daily_quota", None)
             monthly_limit = getattr(client, "monthly_limit", None)
 
-            other_client_ids = [cid for cid in shared_client_ids if cid != client.id]
-            other_monthly_counts = 0
-            if other_client_ids and monthly_limit and monthly_limit > 0:
-                pipe_other = r.pipeline()
-                for cid in other_client_ids:
-                    pipe_other.get(f"usage:{cid}:{monthly_key}")
-                other_results = await pipe_other.execute()
-                for val in other_results:
-                    if val is not None:
-                        other_monthly_counts += int(val)
-
             if (
                 counts.get(minute_key, 0) > rate_limit
                 or (daily_quota and counts.get(daily_key, 0) > daily_quota)
-                or (monthly_limit and (counts.get(monthly_key, 0) + other_monthly_counts) > monthly_limit)
+                or (
+                    monthly_limit
+                    and not shared_monthly_quota
+                    and counts.get(monthly_key, 0) > monthly_limit
+                )
             ):
                 pipe = r.pipeline()
                 for window_key, event_count in reservations:
-                    pipe.decrby(f"usage:{client.id}:{window_key}", event_count)
+                    target_client_id = billing_counter_client_id if window_key == monthly_key else client.id
+                    pipe.decrby(f"usage:{target_client_id}:{window_key}", event_count)
                 await pipe.execute()
                 raise HTTPException(
                     status_code=429,
@@ -262,7 +306,9 @@ async def check_and_reserve_usage(
 
             reserved_keys = {window_key: event_count for window_key, event_count in reservations}
             reserved_keys["_usage_source"] = "redis"
-            if not USAGE_DB_SYNC_IN_REQUEST:
+            if billing_counter_client_id != client.id:
+                reserved_keys["_counter_client_ids"] = {monthly_key: billing_counter_client_id}
+            if not USAGE_DB_SYNC_IN_REQUEST and not shared_monthly_quota:
                 return reserved_keys
         except HTTPException:
             raise
@@ -297,10 +343,9 @@ async def check_and_reserve_usage(
             # Undo inside the current transaction; caller owns commit/rollback.
             if reserved_keys.get("_usage_source") == "redis":
                 await _rollback_redis_counters(client, reserved_keys)
-            for rk, rc in reserved_keys.items():
-                if rk.startswith("_"):
-                    continue
-                await _atomic_rollback(db, client.id, rk, rc)
+            for rk in (minute_key, daily_key):
+                if rk in reserved_keys:
+                    await _atomic_rollback(db, client.id, rk, reserved_keys[rk])
             await db.flush()
             raise HTTPException(
                 status_code=429,
@@ -310,18 +355,22 @@ async def check_and_reserve_usage(
     # ─── Monthly Quota Check ───────────────────────────────────────────
     monthly_limit = getattr(client, "monthly_limit", None)
     if monthly_limit and monthly_limit > 0:
-        monthly_key = f"monthly:{now.strftime('%Y-%m')}"
-        new_monthly = await _atomic_reserve(db, client.id, monthly_key, incoming_event_count)
+        new_monthly = await _atomic_reserve_shared_monthly(
+            db,
+            billing_counter_client_id,
+            shared_client_ids,
+            legacy_monthly_key,
+            monthly_key,
+            incoming_event_count,
+        ) if shared_monthly_quota else await _atomic_reserve(
+            db,
+            client.id,
+            monthly_key,
+            incoming_event_count,
+        )
         reserved_keys[monthly_key] = incoming_event_count
-
-        other_client_ids = [cid for cid in shared_client_ids if cid != client.id]
-        if other_client_ids:
-            other_stmt = select(func.sum(UsageCounter.count)).where(
-                UsageCounter.client_id.in_(other_client_ids),
-                UsageCounter.window_key == monthly_key,
-            )
-            other_res = await db.execute(other_stmt)
-            new_monthly += (other_res.scalar() or 0)
+        if billing_counter_client_id != client.id:
+            reserved_keys.setdefault("_counter_client_ids", {})[monthly_key] = billing_counter_client_id
 
         if new_monthly > monthly_limit:
             # Undo inside the current transaction; caller owns commit/rollback.
@@ -330,7 +379,7 @@ async def check_and_reserve_usage(
             for rk, rc in reserved_keys.items():
                 if rk.startswith("_"):
                     continue
-                await _atomic_rollback(db, client.id, rk, rc)
+                await _atomic_rollback(db, _counter_client_id(client, reserved_keys, rk), rk, rc)
             await db.flush()
             raise HTTPException(
                 status_code=429,
@@ -369,7 +418,8 @@ async def rollback_usage_reservation(
             try:
                 pipe = r.pipeline()
                 for window_key, event_count in counter_keys.items():
-                    pipe.decrby(f"usage:{client.id}:{window_key}", event_count)
+                    target_client_id = _counter_client_id(client, reserved_keys, window_key)
+                    pipe.decrby(f"usage:{target_client_id}:{window_key}", event_count)
                 await pipe.execute()
                 logger.info(f"[{client.name}] Usage reservation rolled back in Redis: {len(counter_keys)} windows")
                 if not reserved_keys.get("_usage_db_synced"):
@@ -382,7 +432,8 @@ async def rollback_usage_reservation(
     # We do NOT commit inside the helper, we just apply modifications.
     # The caller manages the commit/rollback transaction boundary.
     for window_key, event_count in counter_keys.items():
-        await _atomic_rollback(db, client.id, window_key, event_count)
+        target_client_id = _counter_client_id(client, reserved_keys, window_key)
+        await _atomic_rollback(db, target_client_id, window_key, event_count)
     await db.flush()
     logger.info(f"[{client.name}] Usage reservation rolled back in session: {len(counter_keys)} windows")
 
