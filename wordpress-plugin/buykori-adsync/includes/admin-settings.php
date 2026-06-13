@@ -185,7 +185,19 @@ function buykorigw_test_connection() {
     $body = wp_remote_retrieve_body( $response );
 
     if ( $code === 200 ) {
-        wp_send_json_success( 'Connected successfully! Server is online.' );
+        $payload = json_decode( $body, true );
+        if ( is_array( $payload ) && ! empty( $payload['capi_signing_secret'] ) ) {
+            $settings                        = buykorigw_get_settings();
+            $settings['api_key']             = $api_key;
+            $settings['gateway_url']         = $gateway_url;
+            $settings['capi_signing_secret'] = sanitize_text_field( $payload['capi_signing_secret'] );
+            if ( ! empty( $payload['client_name'] ) ) {
+                $settings['connected_client_name'] = sanitize_text_field( $payload['client_name'] );
+            }
+            $settings['connected_at'] = gmdate( 'c' );
+            update_option( BUYKORIGW_OPTION_KEY, $settings );
+        }
+        wp_send_json_success( 'Connected successfully! Server is online and signing secret is synced.' );
     } else {
         wp_send_json_error( "Server responded with HTTP $code. Response: $body" );
     }

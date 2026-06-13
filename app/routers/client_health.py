@@ -34,6 +34,7 @@ from app.services.plan_service import (
     require_growth_access,
     require_trial_available,
 )
+from app.services.client_secrets import ensure_capi_signing_secret
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -90,13 +91,21 @@ class AdminHealthResponse(BaseModel):
 @router.get("/health", summary="Client API health check")
 async def client_api_health(
     client: CachedClient = Depends(get_current_client),
+    db: AsyncSession = Depends(get_db),
 ):
     """Lightweight authenticated health check for plugins and client dashboards."""
+    client_r = await db.execute(select(Client).where(Client.id == client.id))
+    client_row = client_r.scalar_one_or_none()
+    capi_signing_secret = ""
+    if client_row:
+        capi_signing_secret = ensure_capi_signing_secret(client_row)
+        await db.commit()
     return {
         "status": "ok",
         "service": "Buykori AdSync",
         "client_name": client.name,
         "client_id": client.id,
+        "capi_signing_secret": capi_signing_secret,
     }
 
 
