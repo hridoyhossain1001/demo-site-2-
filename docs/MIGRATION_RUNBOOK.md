@@ -40,6 +40,20 @@ When the database role has permission to create disposable databases, run:
 scripts/ops/db_restore_test.sh
 ```
 
+If the production database role cannot create databases, create a disposable
+restore database with a privileged account first, then run the test against
+that explicit target. The script refuses non-test-looking database names unless
+you override it deliberately.
+
+```bash
+RESTORE_TEST_DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/buykori_restore_test" \
+RESTORE_TEST_CONFIRM=buykori_restore_test \
+scripts/ops/db_restore_test.sh
+```
+
+This mode drops and recreates only the `public` schema in the disposable target
+database. Do not point it at production or staging application databases.
+
 ## Migration cutover
 
 1. Restore a recent backup on the destination and complete smoke tests.

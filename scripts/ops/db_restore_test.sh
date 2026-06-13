@@ -30,15 +30,44 @@ PY
 )
 
 SOURCE_URL="${URLS[0]}"
-TEST_URL="${URLS[1]}"
+TEST_URL="${RESTORE_TEST_DATABASE_URL:-${URLS[1]}}"
+
+if [[ -n "${RESTORE_TEST_DATABASE_URL:-}" ]]; then
+  TEST_DB="$(
+    RESTORE_TEST_DATABASE_URL="$RESTORE_TEST_DATABASE_URL" "$PROJECT_DIR/venv/bin/python" - <<'PY'
+import os
+from sqlalchemy.engine import make_url
+
+print(make_url(os.environ["RESTORE_TEST_DATABASE_URL"]).database or "")
+PY
+  )"
+  if [[ -z "$TEST_DB" ]]; then
+    echo "RESTORE_TEST_DATABASE_URL must include a database name." >&2
+    exit 1
+  fi
+  if [[ "$TEST_DB" != *restore* && "$TEST_DB" != *test* && "${ALLOW_NON_TEST_RESTORE_DB:-}" != "true" ]]; then
+    echo "Refusing to restore into '$TEST_DB'. Use a disposable database containing 'restore' or 'test' in its name." >&2
+    exit 1
+  fi
+  if [[ "${RESTORE_TEST_CONFIRM:-}" != "$TEST_DB" ]]; then
+    echo "Set RESTORE_TEST_CONFIRM=$TEST_DB to acknowledge the disposable restore target." >&2
+    exit 1
+  fi
+fi
 
 cleanup() {
-  dropdb --if-exists --force --maintenance-db="$SOURCE_URL" "$TEST_DB" >/dev/null 2>&1 || true
+  if [[ -z "${RESTORE_TEST_DATABASE_URL:-}" ]]; then
+    dropdb --if-exists --force --maintenance-db="$SOURCE_URL" "$TEST_DB" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
 pg_restore --list "$ARCHIVE" >/dev/null
-createdb --maintenance-db="$SOURCE_URL" "$TEST_DB"
+if [[ -z "${RESTORE_TEST_DATABASE_URL:-}" ]]; then
+  createdb --maintenance-db="$SOURCE_URL" "$TEST_DB"
+else
+  psql "$TEST_URL" -v ON_ERROR_STOP=1 -Atqc "drop schema if exists public cascade; create schema public;"
+fi
 pg_restore --dbname="$TEST_URL" --no-owner --no-acl "$ARCHIVE"
 
 TABLE_COUNT="$(psql "$TEST_URL" -Atqc "select count(*) from information_schema.tables where table_schema = 'public';")"
