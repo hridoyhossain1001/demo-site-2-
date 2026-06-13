@@ -37,6 +37,7 @@ router = APIRouter()
 MAX_EVENTS_PER_REQUEST = int(os.getenv("MAX_EVENTS_PER_REQUEST", "500"))
 CAPI_SIGNATURE_WINDOW_SECONDS = int(os.getenv("CAPI_SIGNATURE_WINDOW_SECONDS", "300"))
 GEOIP_ENRICH_IN_REQUEST = os.getenv("GEOIP_ENRICH_IN_REQUEST", "false").lower() in ("true", "1", "yes")
+DROP_WP_STOREFRONT_LEAD_EVENTS = os.getenv("DROP_WP_STOREFRONT_LEAD_EVENTS", "true").lower() in ("1", "true", "yes")
 FRAUD_INTERNAL_CUSTOM_KEYS = {
     "raw_first_name",
     "billing_first_name_raw",
@@ -259,6 +260,16 @@ def _event_order_id(event) -> str:
     return f"auto-{event.event_time}-{identity_hash}"
 
 
+def _is_wp_storefront_lead_event(event) -> bool:
+    if event.event_name != "Lead":
+        return False
+    event_id = str(event.event_id or "")
+    if event_id.startswith("wp_Lead_"):
+        return True
+    source_url = str(event.event_source_url or "")
+    return source_url.startswith("http://") or source_url.startswith("https://")
+
+
 async def _upsert_order_record(
     db: AsyncSession,
     client: CachedClient,
@@ -392,6 +403,18 @@ async def receive_events(
             status_code=413,
             detail=f"Too many events in one request. Max {MAX_EVENTS_PER_REQUEST}.",
         )
+    if DROP_WP_STOREFRONT_LEAD_EVENTS:
+        before_count = len(payload.data)
+        payload.data = [event for event in payload.data if not _is_wp_storefront_lead_event(event)]
+        dropped_count = before_count - len(payload.data)
+        if dropped_count:
+            logger.info("[%s] Dropped %s disabled WordPress storefront Lead event(s).", client.name, dropped_count)
+        if not payload.data:
+            return EventsResponse(
+                status="accepted",
+                events_received=0,
+                message="Disabled storefront Lead event dropped.",
+            )
     version_header = request.headers.get("x-buykori-version")
     if version_header:
         logger.info(f"[{client.name}] Request received from plugin version: {version_header}")
