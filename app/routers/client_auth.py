@@ -108,6 +108,20 @@ def _validate_phone_number(phone_number: str) -> str:
     raise HTTPException(status_code=400, detail="Enter a valid phone number for trial support.")
 
 
+def _csrf_cookie_values(request: Request) -> list[str]:
+    values = []
+    primary = request.cookies.get(CLIENT_CSRF_COOKIE)
+    if primary:
+        values.append(primary)
+
+    raw_cookie = request.headers.get("cookie") or ""
+    for part in raw_cookie.split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and name == CLIENT_CSRF_COOKIE and value and value not in values:
+            values.append(value)
+    return values
+
+
 def require_allowed_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     cookie_authenticated_mutation = (
@@ -128,9 +142,9 @@ def require_allowed_origin(request: Request) -> None:
     if host != request_host and host not in ALLOWED_CLIENT_AUTH_HOSTS:
         raise HTTPException(status_code=403, detail="Origin is not allowed.")
     if cookie_authenticated_mutation:
-        csrf_cookie = request.cookies.get(CLIENT_CSRF_COOKIE) or ""
         csrf_header = request.headers.get(CLIENT_CSRF_HEADER) or ""
-        if not csrf_cookie or not csrf_header or not secrets.compare_digest(csrf_cookie, csrf_header):
+        csrf_cookies = _csrf_cookie_values(request)
+        if not csrf_header or not any(secrets.compare_digest(cookie, csrf_header) for cookie in csrf_cookies):
             raise HTTPException(status_code=403, detail="Client CSRF token is missing or invalid.")
 
 
