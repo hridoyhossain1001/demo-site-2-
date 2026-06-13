@@ -172,16 +172,18 @@ def _set_session_cookie(response: Response, token: str, request: Request) -> Non
 def _set_csrf_cookie(response: Response, request: Request) -> str:
     token = secrets.token_urlsafe(32)
     domain = _get_cookie_domain(request)
-    response.set_cookie(
+    cookie_kwargs = dict(
         key=CLIENT_CSRF_COOKIE,
         value=token,
         max_age=SESSION_DAYS * 24 * 60 * 60,
         httponly=False,
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
-        domain=domain,
         path="/",
     )
+    response.set_cookie(**cookie_kwargs, domain=domain)
+    if domain:
+        response.set_cookie(**cookie_kwargs, domain=None)
     return token
 
 
@@ -203,6 +205,14 @@ def _clear_session_cookie(response: Response, request: Request) -> None:
         httponly=False,
         samesite=COOKIE_SAMESITE,
     )
+    if domain:
+        response.delete_cookie(
+            key=CLIENT_CSRF_COOKIE,
+            path="/",
+            secure=COOKIE_SECURE,
+            httponly=False,
+            samesite=COOKIE_SAMESITE,
+        )
 
 
 def _user_payload(user: ClientUser, client: Client) -> dict:

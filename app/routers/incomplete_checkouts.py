@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -65,6 +65,7 @@ async def recover_open_checkouts_for_order(
     client_id: int,
     phone: str,
     order_id: str,
+    visitor_id: str | None = None,
     activity_window_start: datetime | None = None,
     activity_window_end: datetime | None = None,
 ) -> int:
@@ -79,11 +80,19 @@ async def recover_open_checkouts_for_order(
     except HTTPException:
         return 0
 
+    identity_filters = [IncompleteCheckout.phone_hash == phone_hash]
+    clean_visitor_id = (visitor_id or "").strip()
+    if len(clean_visitor_id) >= 8:
+        identity_filters.append(IncompleteCheckout.visitor_id == clean_visitor_id)
+
     filters = [
         IncompleteCheckout.client_id == client_id,
-        IncompleteCheckout.phone_hash == phone_hash,
         IncompleteCheckout.status.in_(["active", "incomplete", "contacted"]),
     ]
+    if len(identity_filters) == 1:
+        filters.append(identity_filters[0])
+    else:
+        filters.append(or_(*identity_filters))
     if activity_window_start is not None:
         filters.append(IncompleteCheckout.last_activity_at >= activity_window_start)
     if activity_window_end is not None:
@@ -172,6 +181,22 @@ async def upsert_incomplete_checkout(
     if draft.status == "incomplete":
         draft.status = "active"
 
+    stale_r = await db.execute(
+        select(IncompleteCheckout)
+        .where(
+            IncompleteCheckout.client_id == client.id,
+            IncompleteCheckout.visitor_id == visitor_id,
+            IncompleteCheckout.phone_hash != phone_hash,
+            IncompleteCheckout.status == "active",
+            IncompleteCheckout.id != draft.id,
+        )
+        .with_for_update()
+    )
+    for stale_draft in stale_r.scalars().all():
+        stale_draft.status = "ignored"
+        stale_draft.converted_at = now
+        stale_draft.last_activity_at = now
+
     await db.commit()
     await db.refresh(draft)
     return {"success": True, "id": draft.id, "status": draft.status}
@@ -189,6 +214,7 @@ async def convert_incomplete_checkout(
         client_id=client.id,
         phone=payload.phone,
         order_id=payload.order_id,
+        visitor_id=payload.visitor_id,
     )
     await db.commit()
     if not converted_count:
