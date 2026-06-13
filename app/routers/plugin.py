@@ -55,7 +55,7 @@ class PluginDisconnectRequest(BaseModel):
 
 # Plugin version এই ফাইলে hardcoded — PLUGIN_VERSION env var দিয়ে override করা যায়।
 # Update করার সময় এখানে version change করুন এবং WP plugin-এও update করুন।
-PLUGIN_VERSION = "1.2.51"
+PLUGIN_VERSION = "1.2.52"
 PLUGIN_SOURCE_DIR = Path(__file__).resolve().parents[2] / "wordpress-plugin" / "buykori-adsync"
 PLUGIN_ZIP_PATH = Path(
     os.getenv(
@@ -179,6 +179,9 @@ def _plugin_update_response(download_url: str, package_sha256: str, signature: s
         "last_updated": "2026-06-11",
         "description": "Official Buykori AdSync WordPress plugin for server-side Facebook CAPI, TikTok, and GA4 tracking with one-page landing support and deferred purchase control.",
         "changelog": (
+            "<h4>v1.2.52</h4><ul>"
+            "<li>Refreshes the plugin package so connected stores can receive the dedicated CAPI signing-secret update</li>"
+            "</ul>"
             "<h4>v1.2.51</h4><ul>"
             "<li>Adds WooCommerce variation attributes such as color and size to pending COD order details</li>"
             "</ul>"

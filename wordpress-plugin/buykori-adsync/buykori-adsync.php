@@ -3,7 +3,7 @@
  * Plugin Name:       Buykori AdSync — Server-Side Tracking
  * Plugin URI:        https://buykori.app/
  * Description:       Server-Side Facebook CAPI, TikTok, and GA4 tracking for WooCommerce with one-page landing support, SHA-256 PII hashing, and deferred purchase control.
- * Version:           1.2.51
+ * Version:           1.2.52
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Buykori AdSync
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 // ─── Plugin Constants ──────────────────────────────────────────────────────────
-define('BUYKORIGW_VERSION', '1.2.51');
+define('BUYKORIGW_VERSION', '1.2.52');
 define('BUYKORIGW_OPTIONAL_EVENTS_POLICY_VERSION', '1.2.33');
 
 define('BUYKORIGW_PLUGIN_FILE', __FILE__);

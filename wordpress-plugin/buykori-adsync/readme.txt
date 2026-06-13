@@ -4,11 +4,14 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.51
+Stable tag: 1.2.52
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
 == Changelog ==
+
+= 1.2.52 =
+* Refreshes the plugin package so connected stores can receive the dedicated CAPI signing-secret update.
 
 = 1.2.51 =
 * Adds WooCommerce variation attributes such as color and size to pending COD order details.
