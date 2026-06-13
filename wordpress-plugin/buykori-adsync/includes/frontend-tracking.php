@@ -378,6 +378,10 @@ function buykorigw_ajax_track_event() {
         wp_send_json_error( 'Invalid event name' );
     }
 
+    if ( function_exists( 'buykorigw_event_enabled_by_settings' ) && ! buykorigw_event_enabled_by_settings( $event_name, $settings ) ) {
+        wp_send_json_error( 'Event disabled', 403 );
+    }
+
     if ( buykorigw_ajax_rate_limited( $event_name ) ) {
         wp_send_json_error( 'Rate limit exceeded', 429 );
     }

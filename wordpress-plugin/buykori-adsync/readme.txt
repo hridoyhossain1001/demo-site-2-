@@ -4,11 +4,14 @@ Tags: facebook, capi, server-side tracking, woocommerce, pixel, ga4, tiktok
 Requires at least: 5.8
 Tested up to: 6.7
 Requires PHP: 7.4
-Stable tag: 1.2.53
+Stable tag: 1.2.54
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
 == Changelog ==
+
+= 1.2.54 =
+* Blocks disabled storefront events at both the browser tracker and WordPress tracking endpoints, preventing optional events such as Lead from firing when toggled off.
 
 = 1.2.53 =
 * Syncs the dedicated CAPI signing secret during the WordPress plugin health check so stores can recover without reconnecting.

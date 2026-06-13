@@ -739,7 +739,30 @@
         return cachedDeviceContext;
     }
 
+    function eventToggleKey(eventName) {
+        var map = {
+            PageView: 'pageview',
+            ViewContent: 'viewcontent',
+            AddToCart: 'addtocart',
+            ViewCart: 'viewcart',
+            RemoveFromCart: 'removefromcart',
+            InitiateCheckout: 'checkout',
+            AddPaymentInfo: 'addpaymentinfo',
+            Purchase: 'purchase',
+            Lead: 'lead',
+            Search: 'search'
+        };
+        return map[eventName] || '';
+    }
+
+    function eventEnabled(eventName) {
+        var key = eventToggleKey(eventName);
+        return !key || !cfg.events || cfg.events[key] !== false;
+    }
+
     function sendEvent(eventName, eventData, synchronous) {
+        if (!eventEnabled(eventName)) return;
+
         eventData = normalizeEventData(eventData || {});
         var explicitEventId = eventData._buykorigw_event_id || eventData.event_id || '';
         delete eventData._buykorigw_event_id;

@@ -3,7 +3,7 @@
  * Plugin Name:       Buykori AdSync — Server-Side Tracking
  * Plugin URI:        https://buykori.app/
  * Description:       Server-Side Facebook CAPI, TikTok, and GA4 tracking for WooCommerce with one-page landing support, SHA-256 PII hashing, and deferred purchase control.
- * Version:           1.2.53
+ * Version:           1.2.54
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Buykori AdSync
@@ -20,7 +20,7 @@ if (!defined('ABSPATH')) {
 }
 
 // ─── Plugin Constants ──────────────────────────────────────────────────────────
-define('BUYKORIGW_VERSION', '1.2.53');
+define('BUYKORIGW_VERSION', '1.2.54');
 define('BUYKORIGW_OPTIONAL_EVENTS_POLICY_VERSION', '1.2.33');
 
 define('BUYKORIGW_PLUGIN_FILE', __FILE__);
@@ -1736,6 +1736,33 @@ function buykorigw_rest_ack_atc_receipts(WP_REST_Request $request)
     return new WP_REST_Response(array('success' => true), 200);
 }
 
+function buykorigw_event_enabled_by_settings($event_name, $settings = null)
+{
+    $event_toggle_map = array(
+        'PageView'        => 'enable_pageview',
+        'ViewContent'     => 'enable_viewcontent',
+        'AddToCart'       => 'enable_addtocart',
+        'ViewCart'        => 'enable_viewcart',
+        'RemoveFromCart'  => 'enable_removefromcart',
+        'InitiateCheckout' => 'enable_checkout',
+        'AddPaymentInfo'  => 'enable_addpaymentinfo',
+        'Purchase'        => 'enable_purchase',
+        'Lead'            => 'enable_lead',
+        'Search'          => 'enable_search',
+    );
+
+    if (!isset($event_toggle_map[$event_name])) {
+        return true;
+    }
+
+    if (!is_array($settings)) {
+        $settings = buykorigw_get_settings();
+    }
+
+    $setting_key = $event_toggle_map[$event_name];
+    return !empty($settings[$setting_key]);
+}
+
 function buykorigw_rest_track_event(WP_REST_Request $request)
 {
     $rest_nonce = $request->get_header('x-wp-nonce');
@@ -1809,6 +1836,11 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
         return new WP_REST_Response(array('success' => false, 'message' => 'Invalid event name'), 400);
     }
 
+    $settings = buykorigw_get_settings();
+    if (!buykorigw_event_enabled_by_settings($event_name, $settings)) {
+        return new WP_REST_Response(array('success' => false, 'message' => 'Event disabled'), 403);
+    }
+
     if (function_exists('buykorigw_ajax_rate_limited') && buykorigw_ajax_rate_limited($event_name)) {
         return new WP_REST_Response(array('success' => false, 'message' => 'Rate limit exceeded'), 429);
     }
@@ -1817,7 +1849,6 @@ function buykorigw_rest_track_event(WP_REST_Request $request)
     buykorigw_ensure_first_party_identity($fbp, $fbc, $ttp, $ttclid, $external_id, $params['fbclid'] ?? '');
 
     // ─── Parse Custom Data ───────────────────────────────────────────────
-    $settings    = buykorigw_get_settings();
     $custom_data = is_string($event_json) ? json_decode($event_json, true) : (array) $event_json;
     if (!is_array($custom_data)) {
         $custom_data = array();
