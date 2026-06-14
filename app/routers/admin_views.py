@@ -37,6 +37,7 @@ from app.models.ad_campaign import AdCampaign
 from app.models.client_support_note import ClientSupportNote
 from app.security import encrypt_token
 from app.services.auth_service import verify_admin_password
+from app.services.client_lifecycle import delete_client_cascade, rotate_client_secret
 from app.services.webhook_service import _webhook_url_allowed
 from app.services.plan_service import (
     assign_paid_plan,
@@ -364,9 +365,9 @@ async def client_instructions(
             "title": f"Instructions — {client.name}",
             "active_page": "clients",
             "client": client,
-            "portal_key": getattr(client, "portal_key", None) or client.api_key,
+            "portal_key": getattr(client, "portal_key", None) or "",
             "masked_api_key": mask_secret(client.api_key),
-            "masked_portal_key": mask_secret(getattr(client, "portal_key", None) or client.api_key),
+            "masked_portal_key": mask_secret(getattr(client, "portal_key", None)) if getattr(client, "portal_key", None) else "Rotate to generate portal key",
             "masked_public_key": mask_secret(getattr(client, "public_key", None) or ""),
             "endpoint": endpoint,
             "tracker_url": tracker_url,
@@ -387,16 +388,18 @@ async def rotate_client_key(
         raise HTTPException(status_code=404, detail="Client not found")
 
     old_api_key = client.api_key
-    if key_type == "api":
-        client.api_key = secrets.token_urlsafe(32)
+    try:
+        normalized_key_type, _ = rotate_client_secret(client, key_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid key type")
+
+    if normalized_key_type == "api_key":
         message = "API key rotated. Update WordPress plugin/server integrations."
         action = "client.api_key_rotated"
-    elif key_type == "public":
-        client.public_key = secrets.token_urlsafe(24)
+    elif normalized_key_type == "public_key":
         message = "Public tracker key rotated. Update t.js script URLs."
         action = "client.public_key_rotated"
-    elif key_type == "portal":
-        client.portal_key = secrets.token_urlsafe(24)
+    elif normalized_key_type == "portal_key":
         message = "Portal login key rotated."
         action = "client.portal_key_rotated"
     else:
@@ -502,31 +505,7 @@ async def delete_client(
 
     client_name = client.name
     api_key = client.api_key
-
-    # Delete client dependencies in order to avoid foreign key violations
-    await db.execute(sql_delete(CourierBookingJob).where(CourierBookingJob.client_id == client_id))
-    await db.execute(sql_delete(CourierOrder).where(CourierOrder.client_id == client_id))
-    await db.execute(sql_delete(AdCampaign).where(AdCampaign.ad_account_id.in_(select(AdAccount.id).where(AdAccount.client_id == client_id))))
-    await db.execute(sql_delete(AdAccount).where(AdAccount.client_id == client_id))
-    await db.execute(sql_delete(AdInsightDaily).where(AdInsightDaily.client_id == client_id))
-    await db.execute(sql_delete(NotificationJob).where(NotificationJob.client_id == client_id))
-    await db.execute(sql_delete(IncompleteCheckout).where(IncompleteCheckout.client_id == client_id))
-    await db.execute(sql_delete(PluginConnectSession).where(PluginConnectSession.client_id == client_id))
-    await db.execute(sql_delete(TrialIdentity).where(TrialIdentity.client_id == client_id))
-    await db.execute(sql_delete(EventOutbox).where(EventOutbox.client_id == client_id))
-    await db.execute(sql_delete(FailedEvent).where(FailedEvent.client_id == client_id))
-    await db.execute(sql_delete(PendingEvent).where(PendingEvent.client_id == client_id))
-    await db.execute(sql_delete(EventDedup).where(EventDedup.client_id == client_id))
-    await db.execute(sql_delete(UsageCounter).where(UsageCounter.client_id == client_id))
-    await db.execute(sql_delete(EventLog).where(EventLog.client_id == client_id))
-    await db.execute(sql_delete(ClientSupportNote).where(ClientSupportNote.client_id == client_id))
-    await db.execute(sql_delete(SiteBinding).where(SiteBinding.client_id == client_id))
-
-    # Delete client sessions and users to avoid foreign key constraint violations
-    await db.execute(sql_delete(ClientSession).where(ClientSession.client_id == client_id))
-    await db.execute(sql_delete(ClientUser).where(ClientUser.client_id == client_id))
-
-    await db.delete(client)
+    await delete_client_cascade(db, client)
     await log_admin_action(db, request, username, "client.deleted", client_id, f"Deleted client: {client_name}")
     await db.commit()
 

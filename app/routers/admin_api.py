@@ -33,6 +33,7 @@ from app.models.ad_account import AdAccount
 from app.models.ad_campaign import AdCampaign
 from app.security import encrypt_token
 from app.services.auth_service import verify_admin_password
+from app.services.client_lifecycle import delete_client_cascade, rotate_client_secret
 from app.services.webhook_service import _webhook_url_allowed
 from app.services.courier_booking_service import requeue_failed_booking_job
 from app.dependencies import invalidate_client_cache
@@ -1414,18 +1415,19 @@ async def admin_api_rotate_key(
     if key_type == "api_key":
         client.old_api_key = old_key
         client.api_key_rotated_at = datetime.now(timezone.utc)
-        client.api_key = secrets.token_urlsafe(32)
+    try:
+        normalized_key_type, new_value = rotate_client_secret(client, key_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid key type")
+
+    if normalized_key_type == "api_key":
         await invalidate_client_cache(old_key)
         await invalidate_client_cache(client.api_key)
-    elif key_type == "portal_key":
-        client.portal_key = secrets.token_urlsafe(16)
-    elif key_type == "public_key" and hasattr(client, "public_key"):
-        client.public_key = secrets.token_hex(16)
 
-    await log_admin_action(db, request, actor, f"client.{key_type}_rotated", client.id, f"{key_type} rotated via admin API")
+    await log_admin_action(db, request, actor, f"client.{normalized_key_type}_rotated", client.id, f"{normalized_key_type} rotated via admin API")
     await db.commit()
     await db.refresh(client)
-    return {"status": "success", "key_type": key_type, "new_value": getattr(client, key_type)}
+    return {"status": "success", "key_type": normalized_key_type, "new_value": new_value}
 
 @router.delete("/admin/api/clients/{client_id}")
 @limiter.limit("5/minute")
@@ -1443,30 +1445,7 @@ async def admin_api_delete_client(
     client_name = client.name
     client_api_key = client.api_key
 
-    # Delete client dependencies in order to avoid foreign key violations
-    await db.execute(sql_delete(CourierBookingJob).where(CourierBookingJob.client_id == client_id))
-    await db.execute(sql_delete(CourierOrder).where(CourierOrder.client_id == client_id))
-    await db.execute(sql_delete(AdCampaign).where(AdCampaign.ad_account_id.in_(select(AdAccount.id).where(AdAccount.client_id == client_id))))
-    await db.execute(sql_delete(AdAccount).where(AdAccount.client_id == client_id))
-    await db.execute(sql_delete(AdInsightDaily).where(AdInsightDaily.client_id == client_id))
-    await db.execute(sql_delete(NotificationJob).where(NotificationJob.client_id == client_id))
-    await db.execute(sql_delete(IncompleteCheckout).where(IncompleteCheckout.client_id == client_id))
-    await db.execute(sql_delete(PluginConnectSession).where(PluginConnectSession.client_id == client_id))
-    await db.execute(sql_delete(TrialIdentity).where(TrialIdentity.client_id == client_id))
-    await db.execute(sql_delete(EventOutbox).where(EventOutbox.client_id == client_id))
-    await db.execute(sql_delete(FailedEvent).where(FailedEvent.client_id == client_id))
-    await db.execute(sql_delete(PendingEvent).where(PendingEvent.client_id == client_id))
-    await db.execute(sql_delete(EventDedup).where(EventDedup.client_id == client_id))
-    await db.execute(sql_delete(UsageCounter).where(UsageCounter.client_id == client_id))
-    await db.execute(sql_delete(EventLog).where(EventLog.client_id == client_id))
-    await db.execute(sql_delete(ClientSupportNote).where(ClientSupportNote.client_id == client_id))
-    await db.execute(sql_delete(SiteBinding).where(SiteBinding.client_id == client_id))
-
-    # Delete client sessions and users to avoid foreign key constraint violations
-    await db.execute(sql_delete(ClientSession).where(ClientSession.client_id == client_id))
-    await db.execute(sql_delete(ClientUser).where(ClientUser.client_id == client_id))
-
-    await db.delete(client)
+    await delete_client_cascade(db, client)
     await invalidate_client_cache(client_api_key)
 
     await log_admin_action(db, request, actor, "client.deleted", client_id, f"Client {client_name} deleted via API")
@@ -1512,8 +1491,6 @@ async def admin_api_login(request: Request, payload: AdminLoginRequest, response
 
     return {
         "status": "success",
-        "admin_api_key": jwt_token,
-        "token": jwt_token,
         "csrf_token": csrf_token,
     }
 
@@ -1533,8 +1510,8 @@ def escape_sql_wildcards(search_term: str) -> str:
 async def admin_api_events(
     _: str = Depends(verify_admin_api_key),
     db: AsyncSession = Depends(get_db),
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(default=100, ge=1, le=250),
+    offset: int = Query(default=0, ge=0),
     client_id: int | None = None,
     status: str | None = None,
     platform: str | None = None,

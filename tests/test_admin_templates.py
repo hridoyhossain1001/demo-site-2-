@@ -200,6 +200,32 @@ async def test_admin_client_instructions_render():
 
 
 @pytest.mark.anyio
+async def test_admin_client_instructions_do_not_fallback_portal_key_to_api_key():
+    async with TestingSessionLocal() as session:
+        test_client = Client(
+            name="No Portal Key Instructions",
+            api_key="no-fallback-api-key",
+            portal_key=None,
+            pixel_id="123456",
+            access_token=encrypt_token("fb-token"),
+            is_active=True,
+        )
+        session.add(test_client)
+        await session.commit()
+        await session.refresh(test_client)
+        client_id = test_client.id
+
+    client = TestClient(app)
+    response = client.get(
+        f"/api/v1/admin/client/{client_id}/instructions",
+        auth=("admin", "test-admin-password")
+    )
+    assert response.status_code == 200
+    assert 'id="portal_key" data-secret=""' in response.text
+    assert "Rotate to generate portal key" in response.text
+
+
+@pytest.mark.anyio
 async def test_admin_client_edit_render():
     async with TestingSessionLocal() as session:
         test_client = Client(
@@ -402,6 +428,22 @@ async def test_client_signup_api_requires_phone_number():
 
 
 @pytest.mark.anyio
+async def test_client_cookie_mutation_csrf_error_has_stable_code():
+    client = TestClient(app)
+    client.cookies.set("buykori_client_session", encrypt_token("stale-session-token"))
+
+    response = client.post(
+        "/api/v1/auth/client/logout",
+        headers={"Origin": "http://testserver"},
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["code"] == "client_csrf_invalid"
+    assert "CSRF" in detail["message"]
+
+
+@pytest.mark.anyio
 async def test_marketing_home_render():
     client = TestClient(app)
     response = client.get("/")
@@ -581,9 +623,12 @@ async def test_admin_api_login_success():
     data = response.json()
     assert data["status"] == "success"
     assert data["csrf_token"]
+    assert "admin_api_key" not in data
+    assert "token" not in data
     
-    # Verify it is a valid JWT
-    jwt_token = data["admin_api_key"]
+    # Verify the HttpOnly session cookie contains a valid JWT.
+    jwt_token = response.cookies.get("buykori_admin_session")
+    assert jwt_token
     from app.routers.admin_api import decode_jwt
     payload = decode_jwt(jwt_token, "test-admin-jwt-secret")
     assert payload["sub"] == "admin"
@@ -675,6 +720,61 @@ async def test_admin_api_client_detail_masks_portal_key():
     assert client_payload["portal_key"] != raw_portal_key
     assert client_payload["portal_key_masked"] is True
     assert client_payload["public_key"] == "portal-mask-public-key"
+
+
+@pytest.mark.anyio
+async def test_admin_key_rotation_uses_consistent_secret_shapes():
+    async with TestingSessionLocal() as session:
+        client_row = Client(
+            name="Rotate Consistency Store",
+            api_key="rotate-consistency-api-key",
+            public_key="rotate-consistency-public-key",
+            portal_key="rotate-consistency-portal-key",
+            pixel_id="123456789",
+            access_token=encrypt_token("fb-token"),
+            is_active=True,
+        )
+        session.add(client_row)
+        await session.commit()
+        await session.refresh(client_row)
+        client_id = client_row.id
+
+    api_client = TestClient(app)
+    headers = {"X-Admin-API-Key": "test-admin-api-key"}
+    portal_response = api_client.post(
+        f"/api/v1/admin/api/clients/{client_id}/keys/rotate",
+        headers=headers,
+        json={"key_type": "portal_key"},
+    )
+    assert portal_response.status_code == 200
+    portal_payload = portal_response.json()
+    assert portal_payload["key_type"] == "portal_key"
+    assert len(portal_payload["new_value"]) == 32
+
+    public_response = api_client.post(
+        f"/api/v1/admin/api/clients/{client_id}/keys/rotate",
+        headers=headers,
+        json={"key_type": "public_key"},
+    )
+    assert public_response.status_code == 200
+    public_payload = public_response.json()
+    assert public_payload["key_type"] == "public_key"
+    assert len(public_payload["new_value"]) == 32
+
+    from app.routers.admin_views import create_admin_csrf_token
+    csrf_token = create_admin_csrf_token("admin")
+    view_response = api_client.post(
+        f"/api/v1/admin/client/{client_id}/rotate-portal-key",
+        auth=("admin", "test-admin-password"),
+        data={"csrf_token": csrf_token},
+        follow_redirects=False,
+    )
+    assert view_response.status_code == 303
+
+    async with TestingSessionLocal() as session:
+        rotated = await session.get(Client, client_id)
+        assert rotated is not None
+        assert len(rotated.portal_key) == 32
 
 
 @pytest.mark.anyio
@@ -970,6 +1070,18 @@ async def test_admin_api_events_endpoint():
     data = response.json()
     assert data["totalCount"] == 1
     assert "token" in data["events"][0]["responseBody"]["error"]["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_admin_api_events_rejects_unbounded_pagination():
+    client = TestClient(app)
+    headers = {"X-Admin-API-Key": "test-admin-api-key"}
+
+    too_large = client.get("/api/v1/admin/api/events?limit=251", headers=headers)
+    assert too_large.status_code == 422
+
+    negative_offset = client.get("/api/v1/admin/api/events?offset=-1", headers=headers)
+    assert negative_offset.status_code == 422
 
 
 @pytest.mark.anyio

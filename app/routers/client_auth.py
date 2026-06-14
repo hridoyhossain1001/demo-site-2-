@@ -32,6 +32,7 @@ router = APIRouter()
 CLIENT_SESSION_COOKIE = "buykori_client_session"
 CLIENT_CSRF_COOKIE = "buykori_client_csrf"
 CLIENT_CSRF_HEADER = "X-Client-CSRF-Token"
+CLIENT_CSRF_ERROR_CODE = "client_csrf_invalid"
 SESSION_DAYS = int(os.getenv("CLIENT_SESSION_DAYS", "30"))
 COOKIE_DOMAIN = os.getenv("CLIENT_COOKIE_DOMAIN", ".buykori.app")
 COOKIE_SECURE = os.getenv("CLIENT_COOKIE_SECURE", "true").lower() in ("true", "1", "yes")
@@ -145,7 +146,13 @@ def require_allowed_origin(request: Request) -> None:
         csrf_header = request.headers.get(CLIENT_CSRF_HEADER) or ""
         csrf_cookies = _csrf_cookie_values(request)
         if not csrf_header or not any(secrets.compare_digest(cookie, csrf_header) for cookie in csrf_cookies):
-            raise HTTPException(status_code=403, detail="Client CSRF token is missing or invalid.")
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": CLIENT_CSRF_ERROR_CODE,
+                    "message": "Client CSRF token is missing or invalid.",
+                },
+            )
 
 
 def _get_cookie_domain(request: Request) -> str | None:
